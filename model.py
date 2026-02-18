@@ -35,11 +35,6 @@ class InvertedResidual(nn.Module):
         return self.conv(x)
 
 
-import torch
-import torch.nn as nn
-import yaml
-from torch.ao.quantization import QuantStub, DeQuantStub
-
 def _make_divisible(v, divisor=8, min_value=None):
     if min_value is None:
         min_value = divisor
@@ -48,14 +43,15 @@ def _make_divisible(v, divisor=8, min_value=None):
         new_v += divisor
     return new_v
 
+
 class MobileNetV2(nn.Module):
     def __init__(self, cfg="config.yml"):
         super().__init__()
-            
+
         width_mult = cfg['width_multiplier']
         num_classes = cfg['num_classes']
         settings = cfg['inverted_residual_setting']
-        
+
         input_channel = _make_divisible(32 * width_mult)
         last_channel = _make_divisible(cfg['last_channel'] * max(1.0, width_mult))
 
@@ -80,6 +76,6 @@ class MobileNetV2(nn.Module):
 
     def forward(self, x):
         x = self.features(x)
-        x = x.mean([2, 3]) # Global Average Pool
+        x = x.mean([2, 3])
         x = self.classifier(x)
         return x

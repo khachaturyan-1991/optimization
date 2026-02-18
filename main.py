@@ -1,7 +1,7 @@
 import torch
 import yaml
 from data_loader import DataLoder
-from model import MobileNetV2 # Assuming your class is in model_file.py
+from model import MobileNetV2
 
 
 def main():
