@@ -3,6 +3,8 @@ from torch.utils.data import DataLoader, Subset
 import torchvision
 import torchvision.transforms as transforms
 
+from typing import Dict
+
 
 class DataLoder:
     """
@@ -12,26 +14,25 @@ class DataLoder:
     returns train, test dataloaders
     """
 
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, cfg: Dict):
+        self.cfg = cfg
 
     def get_dataloaders(self):
-        data_cfg = self.config.get("data", {})
-        self.data_dir = str(data_cfg.get("data_dir", "./DATA"))
-        num_train = int(data_cfg.get("num_of_train_img", 0))
-        num_test = int(data_cfg.get("num_of_test_img", 0))
-        train_bs = int(data_cfg.get("train_batch_size", 1))
-        test_bs = int(data_cfg.get("test_batch_size", 1))
+        self.data_dir = str(self.cfg.get("data_dir", "./DATA"))
+        num_train = int(self.cfg.get("num_of_train_img", 0))
+        num_test = int(self.cfg.get("num_of_test_img", 0))
+        train_bs = int(self.cfg.get("train_batch_size", 1))
+        test_bs = int(self.cfg.get("test_batch_size", 1))
 
         transform = transforms.Compose([
             transforms.ToTensor(),
         ])
 
         train_set = torchvision.datasets.CIFAR10(
-            root=self.data_dir, train=True, download=True, transform=transform
+            root=self.data_dir, train=True, download=False, transform=transform
         )
         test_set = torchvision.datasets.CIFAR10(
-            root=self.data_dir, train=False, download=True, transform=transform
+            root=self.data_dir, train=False, download=False, transform=transform
         )
 
         if num_train > 0:
