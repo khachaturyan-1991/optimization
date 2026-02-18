@@ -1,0 +1,13 @@
+data
+
+*.jpg
+*.jpeg
+*.png
+*.npy
+
+*.pyc
+
+*.log
+
+*.sh
+
