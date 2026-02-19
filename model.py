@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.ao.quantization import QuantStub, DeQuantStub
 
 
 class ConvBNReLU(nn.Sequential):
@@ -74,8 +75,13 @@ class MobileNetV2(nn.Module):
             nn.Linear(last_channel, num_classes),
         )
 
+        self.quant = QuantStub()
+        self.dequant = DeQuantStub()
+
     def forward(self, x):
+        x = self.quant(x)
         x = self.features(x)
         x = x.mean([2, 3])
         x = self.classifier(x)
+        x = self.dequant(x)
         return x
