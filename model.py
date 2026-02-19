@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.ao.quantization import QuantStub, DeQuantStub
@@ -66,7 +67,7 @@ class MobileNetV2(nn.Module):
                     InvertedResidual(input_channel, output_channel, stride, expand_ratio=t)
                 )
                 input_channel = output_channel
-        
+
         self.features.append(ConvBNReLU(input_channel, last_channel, kernel_size=1))
         self.features = nn.Sequential(*self.features)
 
@@ -77,6 +78,20 @@ class MobileNetV2(nn.Module):
 
         self.quant = QuantStub()
         self.dequant = DeQuantStub()
+        ckpt_path = cfg["checkpoints"]
+        if os.path.exists(ckpt_path):
+            self._load_checkpoint(ckpt_path)
+
+    def get_layer_names(self):
+        return [name for name, _ in self.named_modules() if name]
+
+    def _load_checkpoint(self, ckpt_path: str):
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            state_dict = checkpoint
+        self.load_state_dict(state_dict, strict=False)
 
     def forward(self, x):
         x = self.quant(x)
