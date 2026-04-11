@@ -1,3 +1,5 @@
+"""Training loop for MobileNetV2 on CIFAR-10."""
+
 import os
 from datetime import datetime
 import torch
@@ -15,11 +17,7 @@ from typing import Dict
 class Train:
 
     def __init__(self, cfg: Dict) -> None:
-        """
-        Docstring for __init__
-
-        :param cfg: config dictionary
-        """
+        """Initialize model, loaders, optimizer, and logger."""
         device_cfg = cfg["train"]["device"]
         if device_cfg == "cuda" and torch.cuda.is_available():
             self.device = "cuda"
@@ -27,17 +25,19 @@ class Train:
             self.device = "mps"
         else:
             self.device = "cpu"
-        self.model = MobileNetV2(cfg=cfg["model"]).to(self.device)
+        from model import get_model
+        self.model = get_model(cfg["model"]).to(self.device)
         self.train_dataloader, self.test_dataloader = DataLoder(cfg["data"]).get_dataloaders()
         self.epochs = cfg["train"]["epochs"]
         self.output_freq = cfg["train"]["output_freq"]
-        base_log_dir = cfg["train"].get("log_dir", "runs")
+        logs_cfg = cfg.get("logs", {})
+        base_log_dir = logs_cfg.get("log_dir", "runs")
         run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.log_dir = os.path.join(base_log_dir, run_id)
         self.ckpt_dir = cfg["train"].get("ckpt_dir", "checkpoints")
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.ckpt_dir, exist_ok=True)
-        self.logger = Logs({"log_dir": self.log_dir, "classes": cfg.get("classes")})
+        self.logger = Logs({"log_dir": self.log_dir, "classes": logs_cfg.get("classes")})
         self.logger.writer.add_text("config", str(cfg))
         self.optimizer = optim.SGD(
             self.model.parameters(), 
@@ -48,6 +48,7 @@ class Train:
         self.loss_fn = nn.CrossEntropyLoss()
 
     def train_step(self):
+        """Run one training epoch and return loss."""
         self.model.train()
         loss_per_trian_step = 0
         for X, y in tqdm(self.train_dataloader, desc="Train", leave=False):
@@ -62,6 +63,7 @@ class Train:
         return loss_per_trian_step
 
     def test_step(self):
+        """Run one evaluation epoch and return loss, mAP, and sample batch."""
         self.model.eval()
         sample_images = None
         sample_labels = None
@@ -87,6 +89,7 @@ class Train:
         return loss_per_test_step, loss_mAP, sample_images, sample_labels, sample_preds
 
     def run(self):
+        """Execute training loop and checkpointing."""
         for epoch in tqdm(range(self.epochs), desc="Epochs"):
             train_loss = self.train_step()
             test_loss, loss_mAP, sample_images, sample_labels, sample_preds = self.test_step()
@@ -94,16 +97,9 @@ class Train:
             if epoch % self.output_freq == 0 and epoch != 0:
                 self.logger.log_predictions(sample_images, sample_labels, sample_preds, epoch)
                 ckpt_path = os.path.join(self.ckpt_dir, f"epoch_{epoch}.pt")
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": self.model.state_dict(),
-                        "optimizer_state_dict": self.optimizer.state_dict(),
-                        "train_loss": train_loss,
-                        "test_loss": test_loss,
-                    },
-                    ckpt_path,
-                )
+                self.model.eval()
+                self.model.save_model(ckpt_path)
+                self.model.train()
                 self.logger.log_text(ckpt_path, epoch)
                 print(f"epoch={epoch} train_loss={train_loss:.4f} test_loss={test_loss:.4f}")
         self.logger.writer.close()

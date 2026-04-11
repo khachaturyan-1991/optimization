@@ -1,3 +1,5 @@
+"""TensorBoard logging helpers."""
+
 import torch
 import torchvision
 from torch.utils.tensorboard import SummaryWriter
@@ -8,6 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 class Logs:
 
     def __init__(self, cfg) -> None:
+        """Initialize writer and class labels."""
         log_dir = cfg["log_dir"]
         classes = cfg.get("classes")
         if not classes:
@@ -27,15 +30,18 @@ class Logs:
         self.writer = SummaryWriter(log_dir)
 
     def log_loss(self, epoch, train_loss, test_loss, loss_mAP=None):
+        """Log scalar losses (and optional loss_mAP)."""
         self.writer.add_scalar("loss/train", train_loss, epoch)
         self.writer.add_scalar("loss/test", test_loss, epoch)
         if loss_mAP is not None:
             self.writer.add_scalar("loss/loss_mAP", loss_mAP, epoch)
 
     def log_text(self, ckpt_path, epoch):
+        """Log checkpoint path."""
         self.writer.add_text("checkpoint", ckpt_path, epoch)
 
     def log_predictions(self, images, labels, preds, epoch):
+        """Log a grid of prediction images with titles."""
         if images is None or labels is None or preds is None:
             return
         

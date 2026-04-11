@@ -1,8 +1,9 @@
+"""Benchmark utilities for evaluation and visualization."""
+
 import os
 from typing import Dict
 
 import torch
-import torchvision
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
@@ -13,6 +14,7 @@ from model import MobileNetV2
 
 class Benchmark:
     def __init__(self, cfg: Dict) -> None:
+        """Initialize model, dataloader, and output paths."""
         device_cfg = cfg["train"]["device"]
         if device_cfg == "cuda" and torch.cuda.is_available():
             self.device = "cuda"
@@ -21,8 +23,45 @@ class Benchmark:
         else:
             self.device = "cpu"
 
-        self.model = MobileNetV2(cfg=cfg["model"]).to(self.device)
+        # Initialize quantization engine (required for quantized models)
+        engine = "qnnpack" if "qnnpack" in torch.backends.quantized.supported_engines else "fbgemm"
+        if torch.backends.quantized.supported_engines:
+            torch.backends.quantized.engine = engine
+
+        self.checkpoint_path = cfg.get("model", {}).get("checkpoint_path")
+        from model import get_model
+        self.model = get_model(cfg["model"]).to(self.device)
         self.model.eval()
+        self.jit_model = None
+        self.quantized_jit = False
+        if self.checkpoint_path:
+            try:
+                if self.checkpoint_path.endswith(".pt"):
+                    self.jit_model = torch.jit.load(self.checkpoint_path, map_location="cpu")
+                    self.jit_model.eval()
+                    graph_str = str(self.jit_model.inlined_graph)
+                    self.quantized_jit = "quantized::" in graph_str
+                    if self.quantized_jit:
+                        if not torch.backends.quantized.supported_engines:
+                            raise RuntimeError(
+                                "Quantized ops not supported in this PyTorch build. "
+                                "Install a build with QuantizedCPU support to benchmark."
+                            )
+                        self.device = "cpu"
+                        self.model.to("cpu")
+                    else:
+                        self.jit_model.to(self.device)
+            except Exception as e:
+                # Second attempt fallback to CPU
+                try:
+                    self.jit_model = torch.jit.load(self.checkpoint_path, map_location="cpu")
+                    self.jit_model.eval()
+                    self.device = "cpu"
+                    self.model.to("cpu")
+                    print(f"Loaded JIT model on CPU after device failure: {e}")
+                except Exception as e2:
+                    print(f"Failed to load JIT model: {e2}")
+                    self.jit_model = None
         _, self.test_dataloader = DataLoder(cfg["data"]).get_dataloaders()
         self.classes = cfg.get(
             "classes",
@@ -39,21 +78,30 @@ class Benchmark:
                 "truck",
             ],
         )
-        self.save_to = cfg.get("benchmark", {}).get("save_to", "benchmark")
+        self.save_to = "benchmark"
+        self.save_as = cfg.get("benchmark", {}).get("save_as", "benchmark_plot.png")
         os.makedirs(self.save_to, exist_ok=True)
-        self.layers_to_investigate = cfg["benckmark"]["plot_layer"]
+        self.layers_to_investigate = cfg.get("benchmark", {}).get("plot_layer", False)
 
     def _compute(self):
+        """Compute mAP and return sample images/labels/preds."""
         sample_images = None
         sample_labels = None
         sample_preds = None
+        if self.jit_model is not None:
+            print("Using JIT-traced model for inference.")
+            model = self.jit_model
+        else:
+            print("Using float model with loaded state_dict for inference.")
+            model = self.model
+
         with torch.no_grad():
             correct = 0
             total = 0
             for X, y in tqdm(self.test_dataloader, desc="Benchmark", leave=False):
                 X = X.to(self.device)
                 y = y.to(self.device)
-                pred = self.model(X)
+                pred = model(X)
                 preds = pred.argmax(dim=1)
                 correct += (preds == y).sum().item()
                 total += y.numel()
@@ -65,6 +113,7 @@ class Benchmark:
         return loss_mAP, sample_images, sample_labels, sample_preds
 
     def _make_plot(self, save_as, sample_images, sample_labels, sample_preds):
+        """Create and save a 3x3 grid plot with per-image titles."""
         fig, axes = plt.subplots(3, 3, figsize=(9, 9), dpi=300)
         axes = axes.flatten()
         for i in range(9):
@@ -84,6 +133,10 @@ class Benchmark:
         return out_path
 
     def plot_weight_histograms(self):
+        """Plot and save weight histograms for model layers."""
+        if self.jit_model is not None:
+            print("Skipping weight histograms for JIT model.")
+            return
         layer_names = self.model.get_layer_names()
         name_to_module = dict(self.model.named_modules())
         for layer_name in layer_names:
@@ -107,11 +160,12 @@ class Benchmark:
             plt.close()
 
     def run(self):
+        """Run benchmark evaluation and save visualizations."""
         loss_mAP, sample_images, sample_labels, sample_preds = self._compute()
         print(f"mAP: {loss_mAP:.4f}")
         if sample_images is not None:
             out_path = self._make_plot(
-                "benchmark_plot.png",
+                self.save_as,
                 sample_images,
                 sample_labels.tolist(),
                 sample_preds.tolist(),

@@ -1,3 +1,5 @@
+"""Data loader utilities for CIFAR-10."""
+
 import torch
 from torch.utils.data import DataLoader, Subset
 import torchvision
@@ -7,32 +9,38 @@ from typing import Dict
 
 
 class DataLoder:
-    """
-    loades images from ./DATA
-    takes config as input
-    sets number of images and batch from config
-    returns train, test dataloaders
-    """
+    """Create train/test dataloaders from a config dict."""
 
     def __init__(self, cfg: Dict):
+        """Store data config."""
         self.cfg = cfg
 
     def get_dataloaders(self):
+        """Return (train_loader, test_loader) per config limits."""
         self.data_dir = str(self.cfg.get("data_dir", "./DATA"))
         num_train = int(self.cfg.get("num_of_train_img", 0))
         num_test = int(self.cfg.get("num_of_test_img", 0))
         train_bs = int(self.cfg.get("train_batch_size", 1))
         test_bs = int(self.cfg.get("test_batch_size", 1))
+        dataset_name = self.cfg.get("dataset", "cifar10").lower()
 
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
+        if dataset_name == "mnist":
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.1307,), (0.3081,)),
+            ])
+            dataset_class = torchvision.datasets.MNIST
+        else:
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+            ])
+            dataset_class = torchvision.datasets.CIFAR10
 
-        train_set = torchvision.datasets.CIFAR10(
-            root=self.data_dir, train=True, download=False, transform=transform
+        train_set = dataset_class(
+            root=self.data_dir, train=True, download=True, transform=transform
         )
-        test_set = torchvision.datasets.CIFAR10(
-            root=self.data_dir, train=False, download=False, transform=transform
+        test_set = dataset_class(
+            root=self.data_dir, train=False, download=True, transform=transform
         )
 
         if num_train > 0:
