@@ -14,9 +14,9 @@ def main():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config.yml", help="path to config file")
-    parser.add_argument("--train", type=bool, default=False, help="start training")
-    parser.add_argument("--benchmark", type=bool, default=False, help="start benchmarking")
-    parser.add_argument("--quantize", type=bool, default=False, help="start quantization")
+    parser.add_argument("--train", action="store_true", help="start training")
+    parser.add_argument("--benchmark", action="store_true", help="start benchmarking")
+    parser.add_argument("--quantize", action="store_true", help="start quantization")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:

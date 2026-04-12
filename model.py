@@ -168,46 +168,51 @@ class MobileNetV2(nn.Module):
         x = self.classifier(x)
         x = self.dequant(x)
         return x
+
+
 class SimpleCNN(nn.Module):
     def __init__(self, cfg: Dict):
         super(SimpleCNN, self).__init__()
+        input_channels = int(cfg.get("input_channels", 1))
+        num_classes = int(cfg.get("num_classes", 10))
+        self.input_size = int(cfg.get("input_size", 28))
+
         self.quant = QuantStub()
         self.dequant = DeQuantStub()
         self.features = nn.Sequential(
-            nn.Conv2d(1, 32, 3, 1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 3, 1),
-            nn.ReLU(),
+            nn.Conv2d(input_channels, 32, 3, 1, 1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(32, 64, 3, 1, 1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=False),
             nn.MaxPool2d(2),
             nn.Dropout(0.25),
         )
+        feature_dim = self._infer_feature_dim(input_channels)
         self.classifier = nn.Sequential(
-            nn.Linear(9216, 128),
-            nn.ReLU(),
+            nn.Linear(feature_dim, 128),
+            nn.ReLU(inplace=False),
             nn.Dropout(0.5),
-            nn.Linear(128, 10),
+            nn.Linear(128, num_classes),
         )
         ckpt_path = cfg.get("checkpoint_path")
         if ckpt_path:
             self._load_checkpoint(ckpt_path)
 
     def _load_checkpoint(self, ckpt_path: str):
-        # reuse the same logic
-        state_dict_path = ckpt_path.replace(".pt", ".state_dict.pt")
-        is_strict = False
-        if os.path.exists(state_dict_path):
-            print(f"Loading state_dict from {state_dict_path}")
-            state_dict = torch.load(state_dict_path, map_location="cpu")
-            is_strict = True
-        elif os.path.exists(ckpt_path):
-            print(f"Loading JIT model and extracting state_dict from {ckpt_path}")
-            jit_model = torch.jit.load(ckpt_path, map_location="cpu")
-            state_dict = jit_model.state_dict()
-            is_strict = False
-        else:
+        if not os.path.exists(ckpt_path):
             return
+        print(f"Loading JIT model and extracting state_dict from {ckpt_path}")
+        jit_model = torch.jit.load(ckpt_path, map_location="cpu")
+        state_dict = jit_model.state_dict()
+        self.load_state_dict(state_dict, strict=False)
 
-        self.load_state_dict(state_dict, strict=is_strict)
+    def _infer_feature_dim(self, input_channels: int) -> int:
+        with torch.no_grad():
+            dummy = torch.zeros(1, input_channels, self.input_size, self.input_size)
+            out = self.features(dummy)
+        return int(out.numel())
 
     def forward(self, x):
         x = self.quant(x)
@@ -218,9 +223,7 @@ class SimpleCNN(nn.Module):
         return x
 
     def save_model(self, ckpt_path: str = "model.pt"):
-        state_dict_path = ckpt_path.replace(".pt", ".state_dict.pt")
-        torch.save(self.state_dict(), state_dict_path)
-        dummy_input = torch.randn(1, 1, 28, 28)
+        dummy_input = torch.randn(1, 1, self.input_size, self.input_size)
         self.eval()
         with torch.no_grad():
             traced_model = torch.jit.trace(self, dummy_input)

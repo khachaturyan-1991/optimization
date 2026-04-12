@@ -29,43 +29,45 @@ class Benchmark:
             torch.backends.quantized.engine = engine
 
         self.checkpoint_path = cfg.get("model", {}).get("checkpoint_path")
-        from model import get_model
-        self.model = get_model(cfg["model"]).to(self.device)
-        self.model.eval()
+        self.model = None
         self.jit_model = None
         self.quantized_jit = False
         if self.checkpoint_path:
             try:
-                if self.checkpoint_path.endswith(".pt"):
-                    self.jit_model = torch.jit.load(self.checkpoint_path, map_location="cpu")
-                    self.jit_model.eval()
-                    graph_str = str(self.jit_model.inlined_graph)
-                    self.quantized_jit = "quantized::" in graph_str
-                    if self.quantized_jit:
-                        if not torch.backends.quantized.supported_engines:
-                            raise RuntimeError(
-                                "Quantized ops not supported in this PyTorch build. "
-                                "Install a build with QuantizedCPU support to benchmark."
-                            )
-                        self.device = "cpu"
-                        self.model.to("cpu")
-                    else:
-                        self.jit_model.to(self.device)
+                self.jit_model = torch.jit.load(self.checkpoint_path, map_location="cpu")
+                self.jit_model.eval()
+                graph_str = str(self.jit_model.inlined_graph)
+                self.quantized_jit = "quantized::" in graph_str
+                if self.quantized_jit:
+                    if not torch.backends.quantized.supported_engines:
+                        raise RuntimeError(
+                            "Quantized ops not supported in this PyTorch build. "
+                            "Install a build with QuantizedCPU support to benchmark."
+                        )
+                    self.device = "cpu"
+                else:
+                    self.jit_model.to(self.device)
             except Exception as e:
-                # Second attempt fallback to CPU
                 try:
                     self.jit_model = torch.jit.load(self.checkpoint_path, map_location="cpu")
                     self.jit_model.eval()
                     self.device = "cpu"
-                    self.model.to("cpu")
                     print(f"Loaded JIT model on CPU after device failure: {e}")
                 except Exception as e2:
                     print(f"Failed to load JIT model: {e2}")
                     self.jit_model = None
+        if self.jit_model is None:
+            from model import get_model
+            self.model = get_model(cfg["model"]).to(self.device)
+            self.model.eval()
         _, self.test_dataloader = DataLoder(cfg["data"]).get_dataloaders()
-        self.classes = cfg.get(
-            "classes",
-            [
+        dataset_name = cfg.get("data", {}).get("dataset", "cifar10").lower()
+        if "classes" in cfg:
+            self.classes = cfg["classes"]
+        elif dataset_name == "mnist":
+            self.classes = [str(i) for i in range(10)]
+        else:
+            self.classes = [
                 "airplane",
                 "automobile",
                 "bird",
@@ -76,8 +78,7 @@ class Benchmark:
                 "horse",
                 "ship",
                 "truck",
-            ],
-        )
+            ]
         self.save_to = "benchmark"
         self.save_as = cfg.get("benchmark", {}).get("save_as", "benchmark_plot.png")
         os.makedirs(self.save_to, exist_ok=True)
@@ -120,7 +121,10 @@ class Benchmark:
             ax = axes[i]
             if i < len(sample_labels):
                 img = sample_images[i].permute(1, 2, 0).numpy()
-                ax.imshow(img)
+                if img.shape[2] == 1:
+                    ax.imshow(img.squeeze(-1), cmap="gray")
+                else:
+                    ax.imshow(img)
                 label = self.classes[sample_labels[i]]
                 pred = self.classes[sample_preds[i]]
                 ax.set_title(f"{label} / {pred}", fontsize=8)
