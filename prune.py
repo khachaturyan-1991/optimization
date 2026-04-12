@@ -1,0 +1,88 @@
+"""Simple structural pruning script using torch_pruning."""
+
+import argparse
+import glob
+import os
+import yaml
+import torch
+import torch_pruning as tp
+
+from model import get_model
+
+
+def _find_latest_checkpoint(ckpt_dir: str) -> str | None:
+    pattern = os.path.join(ckpt_dir, "epoch_*.pt")
+    candidates = glob.glob(pattern)
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config_mnist.yml")
+    args = parser.parse_args()
+
+    with open(args.config, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    pruning_cfg = cfg.get("pruning", {})
+    ckpt_path = pruning_cfg.get("checkpoint_path")
+    if not ckpt_path:
+        ckpt_dir = cfg.get("train", {}).get("ckpt_dir", "checkpoints")
+        ckpt_path = _find_latest_checkpoint(ckpt_dir)
+
+    if not ckpt_path or not os.path.exists(ckpt_path):
+        raise FileNotFoundError(
+            "No checkpoint found. Set pruning.checkpoint_path or ensure checkpoints exist."
+        )
+
+    cfg_model = cfg.get("model", {})
+    cfg_model["checkpoint_path"] = ckpt_path
+
+    model = get_model(cfg_model)
+    model.eval()
+    model.to("cpu")
+
+    if cfg_model.get("name", "").lower() == "simple_cnn":
+        input_channels = int(cfg_model.get("input_channels", 1))
+        input_size = int(cfg_model.get("input_size", 28))
+        example_inputs = torch.randn(1, input_channels, input_size, input_size)
+    else:
+        example_inputs = torch.randn(1, 3, 32, 32)
+
+    ch_sparsity = float(pruning_cfg.get("ch_sparsity", 0.3))
+    if not (0.0 <= ch_sparsity < 1.0):
+        raise ValueError("pruning.ch_sparsity must be in [0.0, 1.0).")
+
+    def _count_params(m):
+        return sum(p.numel() for p in m.parameters())
+
+    before_params = _count_params(model)
+
+    importance = tp.importance.MagnitudeImportance(p=2)
+    ignored_layers = []
+    # Never prune the final classifier output (num_classes must stay fixed).
+    if hasattr(model, "classifier") and len(model.classifier) > 0:
+        ignored_layers.append(model.classifier[-1])
+
+    pruner = tp.pruner.MagnitudePruner(
+        model,
+        example_inputs,
+        importance=importance,
+        ch_sparsity=ch_sparsity,
+        ignored_layers=ignored_layers,
+    )
+    pruner.step()
+
+    after_params = _count_params(model)
+    print(f"Params before: {before_params}")
+    print(f"Params after : {after_params}")
+
+    output_path = pruning_cfg.get("output_path", "pruned_simple_cnn.pt")
+    model.save_model(output_path)
+    print(f"Pruned model saved to {output_path}")
+
+
+if __name__ == "__main__":
+    main()
