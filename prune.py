@@ -18,13 +18,7 @@ def _find_latest_checkpoint(ckpt_dir: str) -> str | None:
     return max(candidates, key=os.path.getmtime)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="config_mnist.yml")
-    args = parser.parse_args()
-
-    with open(args.config, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+def prune_with_config(cfg: dict) -> None:
 
     pruning_cfg = cfg.get("pruning", {})
     ckpt_path = pruning_cfg.get("checkpoint_path")
@@ -91,6 +85,17 @@ def main() -> None:
     output_path = pruning_cfg.get("output_path", "pruned_simple_cnn.pt")
     model.save_model(output_path)
     print(f"Pruned model saved to {output_path}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config_mnist.yml")
+    args = parser.parse_args()
+
+    with open(args.config, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    prune_with_config(cfg)
 
 
 if __name__ == "__main__":
