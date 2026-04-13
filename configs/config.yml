@@ -1,0 +1,54 @@
+model:
+  width_multiplier: 0.5
+  num_classes: 10
+  last_channel: 512
+  inverted_residual_setting:
+    - [1, 16, 1, 1]
+    - [6, 24, 2, 1]
+    - [6, 32, 2, 2]
+    - [6, 64, 2, 2]
+  checkpoint_path: ./checkpoints/epoch_1000.pt
+
+data:
+  num_of_train_img: 30000
+  num_of_test_img: 500
+  train_batch_size: 32
+  test_batch_size: 12
+
+train:
+  epochs: 101
+  device: mps
+  output_freq: 100
+  ckpt_dir: checkpoints
+
+optimizer:
+  lr: 0.0001
+  momentum: 0.9
+  weight_decay: 0.001
+
+logs:
+  classes: ['plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
+  log_dir: runs
+
+mlflow:
+  enabled: true
+  tracking_uri: "sqlite:////Users/dr.rub/Desktop/quantization/mlflow.db"
+  experiment_name: "MobileNet"
+
+benchmark:
+  save_as: test_bechmark
+  plot_layer: true 
+
+qunatization:
+  num_calibration_batches: 1024
+  checkpoint_path: "checkpoints/mobilenet_v2_quantized.pt"
+  layers_to_keep_fp32: []
+
+pruning:
+  ch_sparsity: 0.3
+  checkpoint_path: "checkpoints/epoch_1000.pt"
+  output_path: "checkpoints/pruned_1000.pt"
+  ignore_layers:
+    - "features.0"
+    - "features.8"
+    - "classifier.1"
