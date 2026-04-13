@@ -62,9 +62,18 @@ def main() -> None:
 
     importance = tp.importance.MagnitudeImportance(p=2)
     ignored_layers = []
-    # Never prune the final classifier output (num_classes must stay fixed).
-    if hasattr(model, "classifier") and len(model.classifier) > 0:
-        ignored_layers.append(model.classifier[-1])
+    ignore_names = pruning_cfg.get("ignore_layers", [])
+    if ignore_names:
+        name_to_module = dict(model.named_modules())
+        for name in ignore_names:
+            module = name_to_module.get(name)
+            if module is None:
+                print(f"[prune] ignore_layers: '{name}' not found in model.")
+                continue
+            ignored_layers.append(module)
+    else:
+        if hasattr(model, "classifier") and len(model.classifier) > 0:
+            ignored_layers.append(model.classifier[-1])
 
     pruner = tp.pruner.MagnitudePruner(
         model,
