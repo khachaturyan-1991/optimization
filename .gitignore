@@ -14,5 +14,5 @@ checkpoints
 
 *.sh
 
-*.yml
-*.yaml
+*.pt
+*.pth
