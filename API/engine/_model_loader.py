@@ -4,7 +4,10 @@ from pathlib import Path
 
 import torch
 
-from _model_loader import ModelLoader, ModelDetails, LayerSpec
+try:
+    from API.engine._model_loader_abs import LayerSpec, ModelLoader
+except ModuleNotFoundError:
+    from _model_loader_abs import LayerSpec, ModelLoader
 
 
 class LoaderTorchJit(ModelLoader):

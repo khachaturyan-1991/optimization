@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 import streamlit as st
@@ -11,9 +12,36 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from API.engine.upload_jit import JITModelInspector
+from API.engine._model_loader import LoaderTorchJit
 
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "API" / "data" / "configs" / "config.yml"
+
+
+def extract_layer_names(loader: LoaderTorchJit) -> list[dict[str, str]]:
+    """Normalize loader graph details into the UI layer shape."""
+    layers: list[dict[str, str]] = []
+    for layer in loader.get_details().graph:
+        if is_dataclass(layer):
+            layer_data = asdict(layer)
+        elif isinstance(layer, dict):
+            layer_data = layer
+        else:
+            layer_data = {
+                "name": getattr(layer, "name", ""),
+                "op_type": getattr(layer, "op_type", None),
+            }
+
+        name = str(layer_data.get("name") or "").strip()
+        if not name:
+            continue
+
+        layers.append(
+            {
+                "name": name,
+                "type": str(layer_data.get("op_type") or "Unknown"),
+            }
+        )
+    return layers
 
 
 def inspect_uploaded_model(uploaded_model) -> None:
@@ -29,9 +57,8 @@ def inspect_uploaded_model(uploaded_model) -> None:
         temp_path = temp_file.name
 
     try:
-        inspector = JITModelInspector()
-        inspector.load_model(temp_path)
-        st.session_state.prune_model_layers = inspector.get_layer_names()
+        loader = LoaderTorchJit(temp_path)
+        st.session_state.prune_model_layers = extract_layer_names(loader)
         st.session_state.prune_model_error = None
         st.session_state.prune_model_runtime_path = temp_path
     except Exception:
