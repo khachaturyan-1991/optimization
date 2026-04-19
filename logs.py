@@ -34,11 +34,20 @@ class Logs:
         self.writer.add_scalar("loss/train", train_loss, epoch)
         self.writer.add_scalar("loss/test", test_loss, epoch)
         if loss_mAP is not None:
-            self.writer.add_scalar("loss/loss_mAP", loss_mAP, epoch)
+            self.writer.add_scalar("metrics/accuracy", loss_mAP, epoch)
+
+    def log_learning_rate(self, epoch, learning_rate):
+        """Log the optimizer learning rate."""
+        self.writer.add_scalar("optimizer/lr", learning_rate, epoch)
 
     def log_text(self, ckpt_path, epoch):
         """Log checkpoint path."""
         self.writer.add_text("checkpoint", ckpt_path, epoch)
+
+    def log_weights(self, model, epoch):
+        """Log parameter histograms for TensorBoard."""
+        for name, param in model.named_parameters():
+            self.writer.add_histogram(f"weights/{name}", param.detach().cpu(), epoch)
 
     def log_predictions(self, images, labels, preds, epoch):
         """Log a grid of prediction images with titles."""

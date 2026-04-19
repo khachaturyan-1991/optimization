@@ -1,15 +1,20 @@
 """Training loop for MobileNetV2 on CIFAR-10."""
 
 import os
+import sys
 from datetime import datetime
+from pathlib import Path
 import torch
 from torch import nn
 import torch.optim as optim
 from tqdm import tqdm
 
 from data_loader import DataLoder
-from logs import Logs
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
+from logs import Logs
 from typing import Dict
 
 
@@ -59,23 +64,6 @@ class Train:
             weight_decay=cfg["optimizer"]["weight_decay"]
             )
         self.loss_fn = nn.CrossEntropyLoss()
-        self.mlflow_cfg = cfg.get("mlflow", {})
-        self.mlflow_enabled = bool(self.mlflow_cfg.get("enabled", True))
-        self.mlflow = None
-        if self.mlflow_enabled:
-            try:
-                import mlflow
-            except Exception as exc:
-                raise RuntimeError(
-                    "mlflow is required for this training run. "
-                    "Install it in the configured venv."
-                ) from exc
-            tracking_uri = self.mlflow_cfg.get("tracking_uri")
-            if tracking_uri:
-                mlflow.set_tracking_uri(tracking_uri)
-            experiment_name = self.mlflow_cfg.get("experiment_name", "default")
-            mlflow.set_experiment(experiment_name)
-            self.mlflow = mlflow
 
     def train_step(self):
         """Run one training epoch and return loss."""
@@ -120,19 +108,6 @@ class Train:
 
     def run(self):
         """Execute training loop and checkpointing."""
-        run_name = datetime.now().strftime("%Y%m%d-%H%M%S")
-        if self.mlflow:
-            self.mlflow.start_run(run_name=run_name)
-            self.mlflow.log_params({
-                "model_name": self.model.__class__.__name__,
-                "epochs": self.epochs,
-                "optimizer": "SGD",
-                "lr": self.optimizer.param_groups[0]["lr"],
-                "momentum": self.optimizer.param_groups[0].get("momentum", 0.0),
-                "weight_decay": self.optimizer.param_groups[0].get("weight_decay", 0.0),
-                "train_batch_size": self.train_dataloader.batch_size,
-                "test_batch_size": self.test_dataloader.batch_size,
-            })
         best_acc = 0.0
         best_state = None
         try:
@@ -140,11 +115,9 @@ class Train:
                 train_loss = self.train_step()
                 test_loss, loss_mAP, sample_images, sample_labels, sample_preds = self.test_step()
                 self.logger.log_loss(epoch, train_loss, test_loss, loss_mAP)
+                self.logger.log_learning_rate(epoch, self.optimizer.param_groups[0]["lr"])
+                self.logger.log_weights(self.model, epoch)
                 print(f"===== {train_loss}")
-                if self.mlflow:
-                    self.mlflow.log_metric("loss/train", train_loss, step=epoch)
-                    self.mlflow.log_metric("loss/test", test_loss, step=epoch)
-                    self.mlflow.log_metric("accuracy", loss_mAP, step=epoch)
 
                 if loss_mAP > best_acc:
                     best_acc = loss_mAP
@@ -166,11 +139,8 @@ class Train:
                         self.model.to(orig_device)
                     self.model.train()
                     self.logger.log_text(ckpt_path, epoch)
-                    if self.mlflow:
-                        self.mlflow.log_artifact(ckpt_path)
                     print(f"epoch={epoch} train_loss={train_loss:.4f} test_loss={test_loss:.4f}")
-            if self.mlflow:
-                self.mlflow.log_metric("best_accuracy", best_acc)
+            self.logger.writer.add_scalar("metrics/best_accuracy", best_acc, self.epochs)
             model_ckpt_path = self.cfg.get("model", {}).get("checkpoint_path")
             if model_ckpt_path and best_state is not None:
                 self.model.eval()
@@ -182,11 +152,8 @@ class Train:
                     self.model.save_model(model_ckpt_path)
                 else:
                     torch.jit.save(self.model, model_ckpt_path)
-                if self.mlflow:
-                    self.mlflow.log_artifact(model_ckpt_path)
+                self.logger.log_text(model_ckpt_path, self.epochs)
                 if orig_device.type != "cpu":
                     self.model.to(orig_device)
         finally:
-            if self.mlflow:
-                self.mlflow.end_run()
             self.logger.writer.close()

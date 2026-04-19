@@ -7,8 +7,6 @@ import yaml
 import torch
 import torch_pruning as tp
 
-from model import get_model
-
 
 def _find_latest_checkpoint(ckpt_dir: str) -> str | None:
     pattern = os.path.join(ckpt_dir, "epoch_*.pt")
@@ -18,8 +16,30 @@ def _find_latest_checkpoint(ckpt_dir: str) -> str | None:
     return max(candidates, key=os.path.getmtime)
 
 
-def prune_with_config(cfg: dict) -> None:
+def _load_jit_model(ckpt_path: str):
+    """Load the TorchScript model directly from the checkpoint path."""
+    model = torch.jit.load(ckpt_path, map_location="cpu")
+    model.eval()
+    model.to("cpu")
+    return model
 
+
+def _build_example_inputs(cfg: dict) -> torch.Tensor:
+    """Construct example inputs from config or fall back to CIFAR-sized input."""
+    cfg_model = cfg.get("model", {})
+    model_name = cfg_model.get("name", "").lower()
+    if model_name == "simple_cnn":
+        input_channels = int(cfg_model.get("input_channels", 1))
+        input_size = int(cfg_model.get("input_size", 28))
+        return torch.randn(1, input_channels, input_size, input_size)
+
+    data_cfg = cfg.get("data", {})
+    input_channels = int(cfg_model.get("input_channels", data_cfg.get("input_channels", 3)))
+    input_size = int(cfg_model.get("input_size", data_cfg.get("input_size", 32)))
+    return torch.randn(1, input_channels, input_size, input_size)
+
+
+def prune_with_config(cfg: dict) -> None:
     pruning_cfg = cfg.get("pruning", {})
     ckpt_path = pruning_cfg.get("checkpoint_path")
     if not ckpt_path:
@@ -31,23 +51,13 @@ def prune_with_config(cfg: dict) -> None:
             "No checkpoint found. Set pruning.checkpoint_path or ensure checkpoints exist."
         )
 
-    cfg_model = cfg.get("model", {})
-    cfg_model["checkpoint_path"] = ckpt_path
-
-    model = get_model(cfg_model)
-    model.eval()
-    model.to("cpu")
-
-    if cfg_model.get("name", "").lower() == "simple_cnn":
-        input_channels = int(cfg_model.get("input_channels", 1))
-        input_size = int(cfg_model.get("input_size", 28))
-        example_inputs = torch.randn(1, input_channels, input_size, input_size)
-    else:
-        example_inputs = torch.randn(1, 3, 32, 32)
+    model = _load_jit_model(ckpt_path)
+    example_inputs = _build_example_inputs(cfg)
 
     ch_sparsity = float(pruning_cfg.get("ch_sparsity", 0.3))
     if not (0.0 <= ch_sparsity < 1.0):
         raise ValueError("pruning.ch_sparsity must be in [0.0, 1.0).")
+    print(f"Using pruning.ch_sparsity: {ch_sparsity}")
 
     def _count_params(m):
         return sum(p.numel() for p in m.parameters())
@@ -83,7 +93,7 @@ def prune_with_config(cfg: dict) -> None:
     print(f"Params after : {after_params}")
 
     output_path = pruning_cfg.get("output_path", "pruned_simple_cnn.pt")
-    model.save_model(output_path)
+    torch.jit.save(model, output_path)
     print(f"Pruned model saved to {output_path}")
 
 
