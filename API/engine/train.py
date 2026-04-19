@@ -17,6 +17,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from logs import Logs
 from typing import Dict
 
+from _model_loader import LoaderTorchJit
+
 
 class Train:
 
@@ -34,7 +36,8 @@ class Train:
         ckpt_path = cfg.get("model", {}).get("checkpoint_path")
         if ckpt_path and os.path.exists(ckpt_path):
             try:
-                self.model = torch.jit.load(ckpt_path, map_location="cpu")
+                model = LoaderTorchJit(ckpt_path)
+                self.model = model.model
                 self.model.to(self.device)
                 print(f"Loaded JIT model: {ckpt_path}")
             except Exception as exc:
