@@ -7,6 +7,8 @@ import yaml
 import torch
 import torch_pruning as tp
 
+from _model_loader import LoaderTorchJit
+
 
 def _find_latest_checkpoint(ckpt_dir: str) -> str | None:
     pattern = os.path.join(ckpt_dir, "epoch_*.pt")
@@ -14,14 +16,6 @@ def _find_latest_checkpoint(ckpt_dir: str) -> str | None:
     if not candidates:
         return None
     return max(candidates, key=os.path.getmtime)
-
-
-def _load_jit_model(ckpt_path: str):
-    """Load the TorchScript model directly from the checkpoint path."""
-    model = torch.jit.load(ckpt_path, map_location="cpu")
-    model.eval()
-    model.to("cpu")
-    return model
 
 
 def _build_example_inputs(cfg: dict) -> torch.Tensor:
@@ -51,7 +45,8 @@ def prune_with_config(cfg: dict) -> None:
             "No checkpoint found. Set pruning.checkpoint_path or ensure checkpoints exist."
         )
 
-    model = _load_jit_model(ckpt_path)
+    model = LoaderTorchJit(ckpt_path).model
+    model.to("cpu")
     example_inputs = _build_example_inputs(cfg)
 
     ch_sparsity = float(pruning_cfg.get("ch_sparsity", 0.3))

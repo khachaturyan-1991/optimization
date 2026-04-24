@@ -17,9 +17,16 @@ from API.engine._model_loader import LoaderTorchJit
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "API" / "data" / "configs" / "config.yml"
 
 
-def extract_layer_names(loader: LoaderTorchJit) -> list[dict[str, str]]:
-    """Normalize loader graph details into the UI layer shape."""
-    layers: list[dict[str, str]] = []
+def _format_shape(shape) -> str | None:
+    """Render a layer shape tuple in a compact display form."""
+    if not shape:
+        return None
+    return "x".join("?" if dim is None else str(dim) for dim in shape)
+
+
+def extract_layers(loader: LoaderTorchJit) -> list[dict[str, str | None]]:
+    """Normalize loader graph details for the prune UI."""
+    layers: list[dict[str, str | None]] = []
     for layer in loader.get_details().graph:
         if is_dataclass(layer):
             layer_data = asdict(layer)
@@ -29,6 +36,8 @@ def extract_layer_names(loader: LoaderTorchJit) -> list[dict[str, str]]:
             layer_data = {
                 "name": getattr(layer, "name", ""),
                 "op_type": getattr(layer, "op_type", None),
+                "input_shape": getattr(layer, "input_shape", None),
+                "output_shape": getattr(layer, "output_shape", None),
             }
 
         name = str(layer_data.get("name") or "").strip()
@@ -39,6 +48,8 @@ def extract_layer_names(loader: LoaderTorchJit) -> list[dict[str, str]]:
             {
                 "name": name,
                 "type": str(layer_data.get("op_type") or "Unknown"),
+                "input_shape": _format_shape(layer_data.get("input_shape")),
+                "output_shape": _format_shape(layer_data.get("output_shape")),
             }
         )
     return layers
@@ -58,7 +69,7 @@ def inspect_uploaded_model(uploaded_model) -> None:
 
     try:
         loader = LoaderTorchJit(temp_path)
-        st.session_state.prune_model_layers = extract_layer_names(loader)
+        st.session_state.prune_model_layers = extract_layers(loader)
         st.session_state.prune_model_error = None
         st.session_state.prune_model_runtime_path = temp_path
     except Exception:
@@ -163,8 +174,14 @@ def render_architecture() -> None:
         for layer in st.session_state.prune_model_layers:
             depth = layer["name"].count(".")
             indent = "&nbsp;" * 4 * depth
+            shape_parts = []
+            if layer["input_shape"]:
+                shape_parts.append(f"in: {layer['input_shape']}")
+            if layer["output_shape"]:
+                shape_parts.append(f"out: {layer['output_shape']}")
+            shape_suffix = f" [{' | '.join(shape_parts)}]" if shape_parts else ""
             st.markdown(
-                f"{indent}- `{layer['name']}` ({layer['type']})",
+                f"{indent}- `{layer['name']}` ({layer['type']}){shape_suffix}",
                 unsafe_allow_html=True,
             )
 
