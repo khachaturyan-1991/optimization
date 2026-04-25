@@ -10,6 +10,9 @@ import torch.nn as nn
 
 LayerReport = dict[str, bool | float | str]
 SensitivityReport = dict[str, LayerReport]
+WITHIN_MAX_ACCURACY_DROP = "within_max_accuracy_drop"
+EXCEEDS_MAX_ACCURACY_DROP = "exceeds_max_accuracy_drop"
+EVALUATION_FAILED = "evaluation_failed"
 
 
 class LayerWiseOptimizer(ABC):
@@ -75,6 +78,7 @@ class LayerWiseOptimizer(ABC):
         report: SensitivityReport = {}
 
         for layer_name in self._get_candidate_layers():
+            error_message: str | None = None
             try:
                 test_model = self._clone_model()
                 test_model = self._apply_optimization(
@@ -90,7 +94,8 @@ class LayerWiseOptimizer(ABC):
             except Exception as exc:
                 optimized_accuracy = baseline_accuracy
                 recommended = False
-                reason = f"Layer evaluation failed: {exc}"
+                reason = EVALUATION_FAILED
+                error_message = str(exc)
 
             report[layer_name] = {
                 "recommended": recommended,
@@ -99,6 +104,8 @@ class LayerWiseOptimizer(ABC):
                 "accuracy_drop": baseline_accuracy - optimized_accuracy,
                 "reason": reason,
             }
+            if error_message is not None:
+                report[layer_name]["error"] = error_message
 
         self._last_report = report
         return report
@@ -204,8 +211,8 @@ class LayerWiseOptimizer(ABC):
         """
         accuracy_drop = baseline_accuracy - optimized_accuracy
         if accuracy_drop <= self.max_accuracy_drop:
-            return True, "Accuracy drop is within pruning.max_accuracy_drop."
-        return False, "Accuracy drop exceeds pruning.max_accuracy_drop."
+            return True, WITHIN_MAX_ACCURACY_DROP
+        return False, EXCEEDS_MAX_ACCURACY_DROP
 
     @abstractmethod
     def _apply_optimization(

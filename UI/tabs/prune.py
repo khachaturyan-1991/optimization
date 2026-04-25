@@ -1,10 +1,12 @@
 """Pruning controls for the Streamlit UI."""
 
+import json
 import os
 import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Any, cast
@@ -14,6 +16,8 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "API" / "data" / "configs" / "config.yml"
+LAYER_DECISIONS_FILE = "layer_decisions.jsonl"
+PRUNING_SUMMARY_FILE = "pruning_summary.json"
 
 
 def _get_loader_torch_jit() -> type[Any]:
@@ -121,10 +125,26 @@ def build_prune_config() -> dict:
     return config
 
 
+def _new_prune_run_dir() -> Path:
+    """Return a unique run directory for a UI-launched pruning job."""
+    run_id = datetime.now().strftime("prune-%Y%m%d-%H%M%S-%f")
+    return PROJECT_ROOT / "runs" / run_id
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """Load a structured JSON artifact."""
+    with path.open("r", encoding="utf-8") as file:
+        return cast(dict[str, Any], json.load(file))
+
+
 def run_pruning() -> None:
     """Run the existing pruning CLI with a generated config file."""
     config = build_prune_config()
     pruning_config = config["pruning"]
+    run_dir = _new_prune_run_dir()
+    logging_config = config.setdefault("logging", {})
+    logging_config["run_dir"] = str(run_dir)
+    logging_config.setdefault("console", False)
 
     with tempfile.NamedTemporaryFile(
         mode="w", delete=False, suffix=".yml", encoding="utf-8"
@@ -157,17 +177,30 @@ def run_pruning() -> None:
     if result.returncode != 0:
         raise RuntimeError(combined_output or "Pruning failed.")
 
+    summary_path = run_dir / PRUNING_SUMMARY_FILE
+    layer_decisions_path = run_dir / LAYER_DECISIONS_FILE
+    summary_record = _read_json(summary_path) if summary_path.exists() else {}
+
     st.session_state.prune_run_error = None
     summary = [
         f"Using pruning.ch_sparsity: {pruning_config['ch_sparsity']}",
         f"Using pruning.checkpoint_path: {pruning_config['checkpoint_path']}",
         f"Using pruning.output_path: {pruning_config['output_path']}",
         f"Using pruning.ignore_layers: {pruning_config['ignore_layers']}",
+        f"Run directory: {run_dir}",
+        f"Layer decisions JSONL: {layer_decisions_path}",
+        f"Pruning summary JSON: {summary_path}",
     ]
-    if combined_output:
-        summary.append(combined_output)
-    else:
-        summary.append("Pruning finished successfully.")
+    if summary_record:
+        summary.extend(
+            [
+                f"Params before: {summary_record['params_before']}",
+                f"Params after: {summary_record['params_after']}",
+                f"Params removed: {summary_record['params_removed']}",
+                f"Reduction ratio: {summary_record['params_reduction_ratio']}",
+            ]
+        )
+    summary.append("Pruning finished successfully.")
     st.session_state.prune_run_output = "\n".join(summary)
 
 
@@ -261,7 +294,7 @@ def render_model_selector() -> None:
         st.session_state.prune_model_file = uploaded_model.name
         try:
             inspect_uploaded_model(uploaded_model)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except Exception as exc:
             st.session_state.prune_model_layers = []
             st.session_state.prune_model_runtime_path = None
             st.session_state.prune_model_error = f"Failed to load model: {exc}"
@@ -283,7 +316,7 @@ def render() -> None:
     if st.button("Prune", key="prune_run_button"):
         try:
             run_pruning()
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except Exception as exc:
             st.session_state.prune_run_output = None
             st.session_state.prune_run_error = str(exc)
 

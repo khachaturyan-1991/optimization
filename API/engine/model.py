@@ -1,12 +1,16 @@
 """MobileNetV2 model definition with quantization helpers."""
 
-import logging
 import os
 from typing import Dict
 
 import torch
 import torch.nn as nn
 from torch.ao.quantization import QuantStub, DeQuantStub
+
+try:
+    from API.engine.structured_logging import log_event
+except ModuleNotFoundError:
+    from structured_logging import log_event
 
 
 class ConvBNReLU(nn.Sequential):
@@ -118,14 +122,13 @@ class MobileNetV2(nn.Module):
         if was_training:
             self.train()
         torch.jit.save(traced_model, ckpt_path)
-        logging.info("Model saved to %s", ckpt_path)
+        log_event("model_saved", path=ckpt_path)
 
     def _load_checkpoint(self, ckpt_path: str):
         """Load weights from a JIT checkpoint only."""
         if not os.path.exists(ckpt_path):
-            logging.error("Checkpoint not found: %s", ckpt_path)
+            log_event("checkpoint_missing", level="ERROR", path=ckpt_path)
             return
-        logging.info("Loading JIT model and extracting state_dict from %s", ckpt_path)
         jit_model = torch.jit.load(ckpt_path, map_location="cpu")
         state_dict = jit_model.state_dict()
         for k, v in list(state_dict.items()):
@@ -135,13 +138,14 @@ class MobileNetV2(nn.Module):
         if incompatible.missing_keys or incompatible.unexpected_keys:
             num_missing = len(incompatible.missing_keys)
             num_unexpected = len(incompatible.unexpected_keys)
-            logging.error(
-                "Checkpoint load partial: missing=%s unexpected=%s",
-                num_missing,
-                num_unexpected,
+            log_event(
+                "checkpoint_load_partial",
+                level="ERROR",
+                path=ckpt_path,
+                missing_keys=num_missing,
+                unexpected_keys=num_unexpected,
             )
-        else:
-            logging.info("Successfully loaded model weights.")
+        log_event("checkpoint_loaded", path=ckpt_path)
 
     def _fuse_model(self):
         """Fuse Conv+BN and Conv+BN+ReLU for quantization."""
@@ -208,10 +212,10 @@ class SimpleCNN(nn.Module):
     def _load_checkpoint(self, ckpt_path: str):
         if not os.path.exists(ckpt_path):
             return
-        logging.info("Loading JIT model and extracting state_dict from %s", ckpt_path)
         jit_model = torch.jit.load(ckpt_path, map_location="cpu")
         state_dict = jit_model.state_dict()
         self.load_state_dict(state_dict, strict=False)
+        log_event("checkpoint_loaded", path=ckpt_path)
 
     def _infer_feature_dim(self, input_channels: int) -> int:
         with torch.no_grad():
