@@ -1,7 +1,16 @@
 """CLI entry point."""
 
 import argparse
+import logging
 import yaml
+
+
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(funcName)s | %(message)s"
+LOG_FILE = "./logs.txt"
+
+
+def log(msg: str):
+    logging.info(msg)
 
 
 def main():
@@ -17,7 +26,21 @@ def main():
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
+
+    logging_config = config.get("logging", {}) or {}
+    level_name = str(logging_config.get("level", "INFO")).upper()
+    log_level = getattr(logging, level_name, logging.INFO)
+    if not isinstance(log_level, int):
+        log_level = logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format=LOG_FORMAT,
+        handlers=[
+            logging.FileHandler(LOG_FILE, encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
 
     if args.train:
         from train import Train

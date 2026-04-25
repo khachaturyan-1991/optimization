@@ -1,5 +1,6 @@
 """Training loop for MobileNetV2 on CIFAR-10."""
 
+import logging
 import os
 import sys
 from datetime import datetime
@@ -39,9 +40,9 @@ class Train:
                 model = LoaderTorchJit(ckpt_path)
                 self.model = model.model
                 self.model.to(self.device)
-                print(f"Loaded JIT model: {ckpt_path}")
+                logging.info("Loaded JIT model: %s", ckpt_path)
             except Exception as exc:
-                print(f"Failed to load JIT model from {ckpt_path}: {exc}")
+                logging.error("Failed to load JIT model from %s: %s", ckpt_path, exc)
                 self.model = get_model(cfg["model"]).to(self.device)
         else:
             self.model = get_model(cfg["model"]).to(self.device)
@@ -120,7 +121,7 @@ class Train:
                 self.logger.log_loss(epoch, train_loss, test_loss, loss_mAP)
                 self.logger.log_learning_rate(epoch, self.optimizer.param_groups[0]["lr"])
                 self.logger.log_weights(self.model, epoch)
-                print(f"===== {train_loss}")
+                logging.info("===== %s", train_loss)
 
                 if loss_mAP > best_acc:
                     best_acc = loss_mAP
@@ -142,7 +143,12 @@ class Train:
                         self.model.to(orig_device)
                     self.model.train()
                     self.logger.log_text(ckpt_path, epoch)
-                    print(f"epoch={epoch} train_loss={train_loss:.4f} test_loss={test_loss:.4f}")
+                    logging.info(
+                        "epoch=%s train_loss=%.4f test_loss=%.4f",
+                        epoch,
+                        train_loss,
+                        test_loss,
+                    )
             self.logger.writer.add_scalar("metrics/best_accuracy", best_acc, self.epochs)
             model_ckpt_path = self.cfg.get("model", {}).get("checkpoint_path")
             if model_ckpt_path and best_state is not None:

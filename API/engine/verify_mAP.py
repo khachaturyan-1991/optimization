@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import yaml
 from model import MobileNetV2
@@ -12,7 +14,7 @@ def verify():
     if torch.cuda.is_available(): device = "cuda"
     elif torch.backends.mps.is_available(): device = "mps"
 
-    print(f"Using device: {device}")
+    logging.info("Using device: %s", device)
 
     # 1. Load model via state_dict (as done in MobileNetV2.__init__)
     model_raw = MobileNetV2(cfg=config["model"]).to(device)
@@ -20,7 +22,7 @@ def verify():
 
     # 2. Load model via JIT (as done in Benchmark.__init__)
     ckpt_path = config["model"]["checkpoint_path"]
-    print(f"Loading JIT model from {ckpt_path}")
+    logging.info("Loading JIT model from %s", ckpt_path)
     model_jit = torch.jit.load(ckpt_path, map_location=device)
     model_jit.eval()
 
@@ -40,9 +42,9 @@ def verify():
     acc_raw = get_acc(model_raw, "Raw Model")
     acc_jit = get_acc(model_jit, "JIT Model")
 
-    print("\nResults:")
-    print(f"Raw Model Accuracy: {acc_raw:.4f}")
-    print(f"JIT Model Accuracy: {acc_jit:.4f}")
+    logging.info("Results:")
+    logging.info("Raw Model Accuracy: %.4f", acc_raw)
+    logging.info("JIT Model Accuracy: %.4f", acc_jit)
 
 
 if __name__ == "__main__":

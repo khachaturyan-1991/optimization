@@ -1,5 +1,6 @@
 """Post-training static quantization pipeline."""
 
+import logging
 import os
 import torch
 from typing import Dict
@@ -35,7 +36,7 @@ class Quantizer:
             for kept_name in self.layers_to_keep_fp32:
                 if name == kept_name or name.startswith(kept_name + "."):
                     module.qconfig = None
-                    print(f"Set module {name} to qconfig=None (FP32)")
+                    logging.info("Set module %s to qconfig=None (FP32)", name)
 
         if hasattr(self.model, "_fuse_model"):
             self.model._fuse_model()
@@ -61,13 +62,13 @@ class Quantizer:
         os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
         scripted_model = torch.jit.script(model)
         torch.jit.save(scripted_model, checkpoint_path)
-        print(f"Quantized JIT model saved to {checkpoint_path}")
+        logging.info("Quantized JIT model saved to %s", checkpoint_path)
 
     def run(self):
         """Run prepare, calibrate, convert, and save quantized model."""
         self.prepare_model()
         num_cal = self.num_calibration_batches
-        print(f"Running calibration with {num_cal} batches...")
+        logging.info("Running calibration with %s batches...", num_cal)
         self.calibrate_model(num_batches=num_cal)
 
         final_model = torch.ao.quantization.convert(self.model, inplace=True)

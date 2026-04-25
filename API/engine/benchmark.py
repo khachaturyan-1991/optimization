@@ -1,5 +1,6 @@
 """Benchmark utilities for evaluation and visualization."""
 
+import logging
 import os
 from typing import Dict
 
@@ -52,9 +53,9 @@ class Benchmark:
                     self.jit_model = torch.jit.load(self.checkpoint_path, map_location="cpu")
                     self.jit_model.eval()
                     self.device = "cpu"
-                    print(f"Loaded JIT model on CPU after device failure: {e}")
+                    logging.info("Loaded JIT model on CPU after device failure: %s", e)
                 except Exception as e2:
-                    print(f"Failed to load JIT model: {e2}")
+                    logging.error("Failed to load JIT model: %s", e2)
                     self.jit_model = None
         if self.jit_model is None:
             from model import get_model
@@ -90,10 +91,10 @@ class Benchmark:
         sample_labels = None
         sample_preds = None
         if self.jit_model is not None:
-            print("Using JIT-traced model for inference.")
+            logging.info("Using JIT-traced model for inference.")
             model = self.jit_model
         else:
-            print("Using float model with loaded state_dict for inference.")
+            logging.info("Using float model with loaded state_dict for inference.")
             model = self.model
 
         with torch.no_grad():
@@ -139,14 +140,14 @@ class Benchmark:
     def plot_weight_histograms(self):
         """Plot and save weight histograms for model layers."""
         if self.jit_model is not None:
-            print("Skipping weight histograms for JIT model.")
+            logging.info("Skipping weight histograms for JIT model.")
             return
         layer_names = self.model.get_layer_names()
         name_to_module = dict(self.model.named_modules())
         for layer_name in layer_names:
             module = name_to_module.get(layer_name)
             if module is None or not hasattr(module, "weight"):
-                print(f"Skipping {layer_name}: no such layer or no weights")
+                logging.debug("Skipping %s: no such layer or no weights", layer_name)
                 continue
             weights = module.weight.detach().cpu().flatten().numpy()
             mean_val = float(weights.mean())
@@ -166,7 +167,7 @@ class Benchmark:
     def run(self):
         """Run benchmark evaluation and save visualizations."""
         loss_mAP, sample_images, sample_labels, sample_preds = self._compute()
-        print(f"mAP: {loss_mAP:.4f}")
+        logging.info("mAP: %.4f", loss_mAP)
         if sample_images is not None:
             out_path = self._make_plot(
                 self.save_as,
@@ -174,7 +175,7 @@ class Benchmark:
                 sample_labels.tolist(),
                 sample_preds.tolist(),
             )
-            print(f"Saved plot: {out_path}")
+            logging.info("Saved plot: %s", out_path)
 
         if self.layers_to_investigate:
             self.plot_weight_histograms()

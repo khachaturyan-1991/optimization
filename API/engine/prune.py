@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import glob
+import logging
 import os
 from typing import Any
 
@@ -269,19 +270,25 @@ def _save_pruned_model(
     torch.jit.save(traced_model, output_path)
 
 
-def _print_report(report: SensitivityReport) -> None:
-    """Print a compact sensitivity report."""
+def _log_report(report: SensitivityReport) -> None:
+    """Log a compact sensitivity report."""
     for layer_name, layer_report in report.items():
         status = "selected" if layer_report["recommended"] else "skipped"
         drop = float(layer_report["accuracy_drop"])
         reason = layer_report["reason"]
-        print(f"{status}: {layer_name} accuracy_drop={drop:.6f} ({reason})")
+        logging.info(
+            "%s: %s accuracy_drop=%.6f (%s)",
+            status,
+            layer_name,
+            drop,
+            reason,
+        )
 
 
 def prune_with_config(cfg: dict[str, Any]) -> None:
     """Run layer-wise pruning from a loaded application config."""
     ckpt_path = _checkpoint_path(cfg)
-    print(f"Loading pruning checkpoint: {ckpt_path}")
+    logging.info("Loading pruning checkpoint: %s", ckpt_path)
 
     model = _load_model_for_pruning(cfg, ckpt_path)
     runtime_cfg = _config_with_default_ignored_layers(cfg, model)
@@ -291,7 +298,7 @@ def prune_with_config(cfg: dict[str, Any]) -> None:
     output_path = str(pruning_cfg.get("output_path", "pruned_model.pt"))
     ignored_layers = pruning_cfg.get("ignore_layers", []) or []
     if ignored_layers:
-        print(f"Ignoring layers: {', '.join(ignored_layers)}")
+        logging.info("Ignoring layers: %s", ", ".join(ignored_layers))
 
     before_params = _count_params(model)
     optimizer = PruningOptimizer(
@@ -303,12 +310,12 @@ def prune_with_config(cfg: dict[str, Any]) -> None:
     pruned_model, report = optimizer.optimize()
     after_params = _count_params(pruned_model)
 
-    _print_report(report)
-    print(f"Params before: {before_params}")
-    print(f"Params after : {after_params}")
+    _log_report(report)
+    logging.info("Params before: %s", before_params)
+    logging.info("Params after : %s", after_params)
 
     _save_pruned_model(pruned_model, output_path, test_dataloader)
-    print(f"Pruned model saved to {output_path}")
+    logging.info("Pruned model saved to %s", output_path)
 
 
 def main() -> None:

@@ -1,5 +1,6 @@
 """MobileNetV2 model definition with quantization helpers."""
 
+import logging
 import os
 from typing import Dict
 
@@ -117,14 +118,14 @@ class MobileNetV2(nn.Module):
         if was_training:
             self.train()
         torch.jit.save(traced_model, ckpt_path)
-        print(f"Model saved to {ckpt_path}")
+        logging.info("Model saved to %s", ckpt_path)
 
     def _load_checkpoint(self, ckpt_path: str):
         """Load weights from a JIT checkpoint only."""
         if not os.path.exists(ckpt_path):
-            print(f"Checkpoint not found: {ckpt_path}")
+            logging.error("Checkpoint not found: %s", ckpt_path)
             return
-        print(f"Loading JIT model and extracting state_dict from {ckpt_path}")
+        logging.info("Loading JIT model and extracting state_dict from %s", ckpt_path)
         jit_model = torch.jit.load(ckpt_path, map_location="cpu")
         state_dict = jit_model.state_dict()
         for k, v in list(state_dict.items()):
@@ -134,9 +135,13 @@ class MobileNetV2(nn.Module):
         if incompatible.missing_keys or incompatible.unexpected_keys:
             num_missing = len(incompatible.missing_keys)
             num_unexpected = len(incompatible.unexpected_keys)
-            print(f"Checkpoint load partial: missing={num_missing} unexpected={num_unexpected}")
+            logging.error(
+                "Checkpoint load partial: missing=%s unexpected=%s",
+                num_missing,
+                num_unexpected,
+            )
         else:
-            print("Successfully loaded model weights.")
+            logging.info("Successfully loaded model weights.")
 
     def _fuse_model(self):
         """Fuse Conv+BN and Conv+BN+ReLU for quantization."""
@@ -203,7 +208,7 @@ class SimpleCNN(nn.Module):
     def _load_checkpoint(self, ckpt_path: str):
         if not os.path.exists(ckpt_path):
             return
-        print(f"Loading JIT model and extracting state_dict from {ckpt_path}")
+        logging.info("Loading JIT model and extracting state_dict from %s", ckpt_path)
         jit_model = torch.jit.load(ckpt_path, map_location="cpu")
         state_dict = jit_model.state_dict()
         self.load_state_dict(state_dict, strict=False)
