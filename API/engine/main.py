@@ -3,11 +3,6 @@
 import argparse
 import yaml
 
-from benchmark import Benchmark
-from quantize import Quantizer
-from train import Train
-from prune import prune_with_config
-
 
 def main():
     """
@@ -25,18 +20,26 @@ def main():
         config = yaml.safe_load(f)
 
     if args.train:
+        from train import Train
+
         trainer = Train(config)
         trainer.run()
 
     if args.benchmark:
+        from benchmark import Benchmark
+
         benchmarker = Benchmark(config)
         benchmarker.run()
 
     if args.quantize:
+        from quantize import Quantizer
+
         quantizer = Quantizer(config)
         quantizer.run()
-    
+
     if args.prune:
+        from prune import prune_with_config
+
         prune_with_config(config)
 
 
