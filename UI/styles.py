@@ -1,3 +1,5 @@
+"""Shared CSS helpers for the Streamlit UI."""
+
 import streamlit as st
 
 

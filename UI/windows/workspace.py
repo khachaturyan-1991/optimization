@@ -1,3 +1,5 @@
+"""Workspace window that hosts the optimization tabs."""
+
 import streamlit as st
 
 from config import APP_TITLE

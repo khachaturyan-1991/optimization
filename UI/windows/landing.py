@@ -1,3 +1,5 @@
+"""Landing window for creating or uploading a project."""
+
 import tempfile
 from pathlib import Path
 

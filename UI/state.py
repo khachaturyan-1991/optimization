@@ -1,3 +1,5 @@
+"""Session-state helpers for the Streamlit UI."""
+
 from pathlib import Path
 
 import streamlit as st

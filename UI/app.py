@@ -1,3 +1,5 @@
+"""Streamlit entry point for the model optimization UI."""
+
 import streamlit as st
 
 from config import APP_TITLE
@@ -7,6 +9,7 @@ from windows import landing, workspace
 
 
 def main() -> None:
+    """Initialize and render the active UI window."""
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     init_state()
     apply_global_styles()

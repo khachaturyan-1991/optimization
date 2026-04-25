@@ -1,20 +1,28 @@
+"""Pruning controls for the Streamlit UI."""
+
 import os
 import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, is_dataclass
+from importlib import import_module
 from pathlib import Path
+from typing import Any, cast
 
 import streamlit as st
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from API.engine._model_loader import LoaderTorchJit
-
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "API" / "data" / "configs" / "config.yml"
+
+
+def _get_loader_torch_jit() -> type[Any]:
+    """Return the TorchScript loader after making the API package importable."""
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+
+    module = import_module("API.engine._model_loader")
+    return cast(type[Any], getattr(module, "LoaderTorchJit"))
 
 
 def _format_shape(shape) -> str | None:
@@ -24,7 +32,7 @@ def _format_shape(shape) -> str | None:
     return "x".join("?" if dim is None else str(dim) for dim in shape)
 
 
-def extract_layers(loader: LoaderTorchJit) -> list[dict[str, str | None]]:
+def extract_layers(loader: Any) -> list[dict[str, str | None]]:
     """Normalize loader graph details for the prune UI."""
     layers: list[dict[str, str | None]] = []
     for layer in loader.get_details().graph:
@@ -68,7 +76,8 @@ def inspect_uploaded_model(uploaded_model) -> None:
         temp_path = temp_file.name
 
     try:
-        loader = LoaderTorchJit(temp_path)
+        loader_class = _get_loader_torch_jit()
+        loader = loader_class(temp_path)
         st.session_state.prune_model_layers = extract_layers(loader)
         st.session_state.prune_model_error = None
         st.session_state.prune_model_runtime_path = temp_path
@@ -252,7 +261,7 @@ def render_model_selector() -> None:
         st.session_state.prune_model_file = uploaded_model.name
         try:
             inspect_uploaded_model(uploaded_model)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             st.session_state.prune_model_layers = []
             st.session_state.prune_model_runtime_path = None
             st.session_state.prune_model_error = f"Failed to load model: {exc}"
@@ -274,7 +283,7 @@ def render() -> None:
     if st.button("Prune", key="prune_run_button"):
         try:
             run_pruning()
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             st.session_state.prune_run_output = None
             st.session_state.prune_run_error = str(exc)
 
