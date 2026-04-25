@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import copy
 import glob
-import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -17,13 +17,45 @@ except ModuleNotFoundError:  # pragma: no cover - depends on runtime environment
     tp = None
 
 try:
-    from API.engine._optimization_base import LayerWiseOptimizer, SensitivityReport
+    from API.engine._optimization_base import (
+        EVALUATION_FAILED,
+        EXCEEDS_MAX_ACCURACY_DROP,
+        WITHIN_MAX_ACCURACY_DROP,
+        LayerWiseOptimizer,
+        SensitivityReport,
+    )
     from API.engine.data_loader import DataLoder
     from API.engine.model import get_model
+    from API.engine.structured_logging import (
+        append_jsonl,
+        build_event_record,
+        configure_json_logging,
+        ensure_json_logging,
+        log_event,
+        write_json,
+    )
 except ModuleNotFoundError:
-    from _optimization_base import LayerWiseOptimizer, SensitivityReport
+    from _optimization_base import (
+        EVALUATION_FAILED,
+        EXCEEDS_MAX_ACCURACY_DROP,
+        WITHIN_MAX_ACCURACY_DROP,
+        LayerWiseOptimizer,
+        SensitivityReport,
+    )
     from data_loader import DataLoder
     from model import get_model
+    from structured_logging import (
+        append_jsonl,
+        build_event_record,
+        configure_json_logging,
+        ensure_json_logging,
+        log_event,
+        write_json,
+    )
+
+
+LAYER_DECISIONS_FILE = "layer_decisions.jsonl"
+PRUNING_SUMMARY_FILE = "pruning_summary.json"
 
 
 class PruningOptimizer(LayerWiseOptimizer):
@@ -270,25 +302,76 @@ def _save_pruned_model(
     torch.jit.save(traced_model, output_path)
 
 
-def _log_report(report: SensitivityReport) -> None:
-    """Log a compact sensitivity report."""
+def _decision_reason(layer_report: dict[str, Any]) -> str:
+    """Return the stable reason enum required by layer decision logs."""
+    reason = str(layer_report.get("reason", ""))
+    if reason in {WITHIN_MAX_ACCURACY_DROP, EXCEEDS_MAX_ACCURACY_DROP}:
+        return reason
+    if reason == EVALUATION_FAILED:
+        return EXCEEDS_MAX_ACCURACY_DROP
+    if bool(layer_report.get("recommended")):
+        return WITHIN_MAX_ACCURACY_DROP
+    return EXCEEDS_MAX_ACCURACY_DROP
+
+
+def _reset_jsonl(path: Path) -> None:
+    """Create or truncate a JSONL artifact for the current run."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+
+
+def _log_report(report: SensitivityReport, layer_decisions_path: Path) -> None:
+    """Write layer decisions as structured JSONL events."""
     for layer_name, layer_report in report.items():
         status = "selected" if layer_report["recommended"] else "skipped"
         drop = float(layer_report["accuracy_drop"])
-        reason = layer_report["reason"]
-        logging.info(
-            "%s: %s accuracy_drop=%.6f (%s)",
-            status,
-            layer_name,
-            drop,
-            reason,
-        )
+        fields: dict[str, Any] = {
+            "layer": layer_name,
+            "status": status,
+            "accuracy_drop": drop,
+            "reason": _decision_reason(layer_report),
+        }
+        if layer_report.get("reason") == EVALUATION_FAILED:
+            fields["error"] = str(layer_report.get("error", ""))
+        record = build_event_record("layer_evaluated", **fields)
+        append_jsonl(layer_decisions_path, record)
+        log_event("layer_evaluated", **fields)
+
+
+def _write_pruning_summary(
+    summary_path: Path,
+    before_params: int,
+    after_params: int,
+) -> None:
+    """Write the pruning summary as a structured JSON object."""
+    params_removed = before_params - after_params
+    reduction_ratio = params_removed / before_params if before_params else 0.0
+    fields = {
+        "params_before": int(before_params),
+        "params_after": int(after_params),
+        "params_removed": int(params_removed),
+        "params_reduction_ratio": float(reduction_ratio),
+    }
+    record = build_event_record("pruning_summary", **fields)
+    write_json(summary_path, record)
+    log_event("pruning_summary", **fields)
+
+
+def _artifact_paths(run_dir: Path) -> tuple[Path, Path]:
+    """Return pruning artifact paths for the current run."""
+    return (
+        run_dir / LAYER_DECISIONS_FILE,
+        run_dir / PRUNING_SUMMARY_FILE,
+    )
 
 
 def prune_with_config(cfg: dict[str, Any]) -> None:
     """Run layer-wise pruning from a loaded application config."""
+    run_dir = ensure_json_logging(cfg, workflow="prune")
+    layer_decisions_path, summary_path = _artifact_paths(run_dir)
+    _reset_jsonl(layer_decisions_path)
+
     ckpt_path = _checkpoint_path(cfg)
-    logging.info("Loading pruning checkpoint: %s", ckpt_path)
 
     model = _load_model_for_pruning(cfg, ckpt_path)
     runtime_cfg = _config_with_default_ignored_layers(cfg, model)
@@ -298,7 +381,7 @@ def prune_with_config(cfg: dict[str, Any]) -> None:
     output_path = str(pruning_cfg.get("output_path", "pruned_model.pt"))
     ignored_layers = pruning_cfg.get("ignore_layers", []) or []
     if ignored_layers:
-        logging.info("Ignoring layers: %s", ", ".join(ignored_layers))
+        log_event("layers_ignored", layers=[str(layer) for layer in ignored_layers])
 
     before_params = _count_params(model)
     optimizer = PruningOptimizer(
@@ -310,12 +393,11 @@ def prune_with_config(cfg: dict[str, Any]) -> None:
     pruned_model, report = optimizer.optimize()
     after_params = _count_params(pruned_model)
 
-    _log_report(report)
-    logging.info("Params before: %s", before_params)
-    logging.info("Params after : %s", after_params)
+    _log_report(report, layer_decisions_path)
+    _write_pruning_summary(summary_path, before_params, after_params)
 
     _save_pruned_model(pruned_model, output_path, test_dataloader)
-    logging.info("Pruned model saved to %s", output_path)
+    log_event("model_saved", path=output_path)
 
 
 def main() -> None:
@@ -327,6 +409,7 @@ def main() -> None:
     with open(args.config, "r", encoding="utf-8") as file:
         cfg = yaml.safe_load(file)
 
+    configure_json_logging(cfg, workflow="prune")
     prune_with_config(cfg)
 
 

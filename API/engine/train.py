@@ -1,6 +1,5 @@
 """Training loop for MobileNetV2 on CIFAR-10."""
 
-import logging
 import os
 import sys
 from datetime import datetime
@@ -19,6 +18,11 @@ from logs import Logs
 from typing import Dict
 
 from _model_loader import LoaderTorchJit
+
+try:
+    from API.engine.structured_logging import log_event
+except ModuleNotFoundError:
+    from structured_logging import log_event
 
 
 class Train:
@@ -40,9 +44,14 @@ class Train:
                 model = LoaderTorchJit(ckpt_path)
                 self.model = model.model
                 self.model.to(self.device)
-                logging.info("Loaded JIT model: %s", ckpt_path)
+                log_event("checkpoint_loaded", path=ckpt_path)
             except Exception as exc:
-                logging.error("Failed to load JIT model from %s: %s", ckpt_path, exc)
+                log_event(
+                    "checkpoint_load_failed",
+                    level="ERROR",
+                    path=ckpt_path,
+                    error=str(exc),
+                )
                 self.model = get_model(cfg["model"]).to(self.device)
         else:
             self.model = get_model(cfg["model"]).to(self.device)
@@ -121,7 +130,7 @@ class Train:
                 self.logger.log_loss(epoch, train_loss, test_loss, loss_mAP)
                 self.logger.log_learning_rate(epoch, self.optimizer.param_groups[0]["lr"])
                 self.logger.log_weights(self.model, epoch)
-                logging.info("===== %s", train_loss)
+                log_event("train_loss", epoch=int(epoch), train_loss=float(train_loss))
 
                 if loss_mAP > best_acc:
                     best_acc = loss_mAP
@@ -143,11 +152,11 @@ class Train:
                         self.model.to(orig_device)
                     self.model.train()
                     self.logger.log_text(ckpt_path, epoch)
-                    logging.info(
-                        "epoch=%s train_loss=%.4f test_loss=%.4f",
-                        epoch,
-                        train_loss,
-                        test_loss,
+                    log_event(
+                        "training_epoch",
+                        epoch=int(epoch),
+                        train_loss=float(train_loss),
+                        test_loss=float(test_loss),
                     )
             self.logger.writer.add_scalar("metrics/best_accuracy", best_acc, self.epochs)
             model_ckpt_path = self.cfg.get("model", {}).get("checkpoint_path")

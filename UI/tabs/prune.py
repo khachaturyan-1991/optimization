@@ -1,20 +1,32 @@
+"""Pruning controls for the Streamlit UI."""
+
+import json
 import os
 import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
+from importlib import import_module
 from pathlib import Path
+from typing import Any, cast
 
 import streamlit as st
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from API.engine._model_loader import LoaderTorchJit
-
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "API" / "data" / "configs" / "config.yml"
+LAYER_DECISIONS_FILE = "layer_decisions.jsonl"
+PRUNING_SUMMARY_FILE = "pruning_summary.json"
+
+
+def _get_loader_torch_jit() -> type[Any]:
+    """Return the TorchScript loader after making the API package importable."""
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+
+    module = import_module("API.engine._model_loader")
+    return cast(type[Any], getattr(module, "LoaderTorchJit"))
 
 
 def _format_shape(shape) -> str | None:
@@ -24,7 +36,7 @@ def _format_shape(shape) -> str | None:
     return "x".join("?" if dim is None else str(dim) for dim in shape)
 
 
-def extract_layers(loader: LoaderTorchJit) -> list[dict[str, str | None]]:
+def extract_layers(loader: Any) -> list[dict[str, str | None]]:
     """Normalize loader graph details for the prune UI."""
     layers: list[dict[str, str | None]] = []
     for layer in loader.get_details().graph:
@@ -68,7 +80,8 @@ def inspect_uploaded_model(uploaded_model) -> None:
         temp_path = temp_file.name
 
     try:
-        loader = LoaderTorchJit(temp_path)
+        loader_class = _get_loader_torch_jit()
+        loader = loader_class(temp_path)
         st.session_state.prune_model_layers = extract_layers(loader)
         st.session_state.prune_model_error = None
         st.session_state.prune_model_runtime_path = temp_path
@@ -112,10 +125,26 @@ def build_prune_config() -> dict:
     return config
 
 
+def _new_prune_run_dir() -> Path:
+    """Return a unique run directory for a UI-launched pruning job."""
+    run_id = datetime.now().strftime("prune-%Y%m%d-%H%M%S-%f")
+    return PROJECT_ROOT / "runs" / run_id
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """Load a structured JSON artifact."""
+    with path.open("r", encoding="utf-8") as file:
+        return cast(dict[str, Any], json.load(file))
+
+
 def run_pruning() -> None:
     """Run the existing pruning CLI with a generated config file."""
     config = build_prune_config()
     pruning_config = config["pruning"]
+    run_dir = _new_prune_run_dir()
+    logging_config = config.setdefault("logging", {})
+    logging_config["run_dir"] = str(run_dir)
+    logging_config.setdefault("console", False)
 
     with tempfile.NamedTemporaryFile(
         mode="w", delete=False, suffix=".yml", encoding="utf-8"
@@ -148,17 +177,30 @@ def run_pruning() -> None:
     if result.returncode != 0:
         raise RuntimeError(combined_output or "Pruning failed.")
 
+    summary_path = run_dir / PRUNING_SUMMARY_FILE
+    layer_decisions_path = run_dir / LAYER_DECISIONS_FILE
+    summary_record = _read_json(summary_path) if summary_path.exists() else {}
+
     st.session_state.prune_run_error = None
     summary = [
         f"Using pruning.ch_sparsity: {pruning_config['ch_sparsity']}",
         f"Using pruning.checkpoint_path: {pruning_config['checkpoint_path']}",
         f"Using pruning.output_path: {pruning_config['output_path']}",
         f"Using pruning.ignore_layers: {pruning_config['ignore_layers']}",
+        f"Run directory: {run_dir}",
+        f"Layer decisions JSONL: {layer_decisions_path}",
+        f"Pruning summary JSON: {summary_path}",
     ]
-    if combined_output:
-        summary.append(combined_output)
-    else:
-        summary.append("Pruning finished successfully.")
+    if summary_record:
+        summary.extend(
+            [
+                f"Params before: {summary_record['params_before']}",
+                f"Params after: {summary_record['params_after']}",
+                f"Params removed: {summary_record['params_removed']}",
+                f"Reduction ratio: {summary_record['params_reduction_ratio']}",
+            ]
+        )
+    summary.append("Pruning finished successfully.")
     st.session_state.prune_run_output = "\n".join(summary)
 
 

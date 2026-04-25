@@ -1,6 +1,5 @@
 """Benchmark utilities for evaluation and visualization."""
 
-import logging
 import os
 from typing import Dict
 
@@ -11,6 +10,11 @@ from tqdm import tqdm
 
 from data_loader import DataLoder
 from model import MobileNetV2
+
+try:
+    from API.engine.structured_logging import log_event
+except ModuleNotFoundError:
+    from structured_logging import log_event
 
 
 class Benchmark:
@@ -48,14 +52,29 @@ class Benchmark:
                     self.device = "cpu"
                 else:
                     self.jit_model.to(self.device)
+                log_event(
+                    "checkpoint_loaded",
+                    path=self.checkpoint_path,
+                    device=self.device,
+                )
             except Exception as e:
                 try:
                     self.jit_model = torch.jit.load(self.checkpoint_path, map_location="cpu")
                     self.jit_model.eval()
                     self.device = "cpu"
-                    logging.info("Loaded JIT model on CPU after device failure: %s", e)
+                    log_event(
+                        "checkpoint_loaded",
+                        path=self.checkpoint_path,
+                        device="cpu",
+                        fallback_reason=str(e),
+                    )
                 except Exception as e2:
-                    logging.error("Failed to load JIT model: %s", e2)
+                    log_event(
+                        "checkpoint_load_failed",
+                        level="ERROR",
+                        path=self.checkpoint_path,
+                        error=str(e2),
+                    )
                     self.jit_model = None
         if self.jit_model is None:
             from model import get_model
@@ -91,10 +110,10 @@ class Benchmark:
         sample_labels = None
         sample_preds = None
         if self.jit_model is not None:
-            logging.info("Using JIT-traced model for inference.")
+            log_event("inference_model_selected", model_type="jit")
             model = self.jit_model
         else:
-            logging.info("Using float model with loaded state_dict for inference.")
+            log_event("inference_model_selected", model_type="float")
             model = self.model
 
         with torch.no_grad():
@@ -140,14 +159,19 @@ class Benchmark:
     def plot_weight_histograms(self):
         """Plot and save weight histograms for model layers."""
         if self.jit_model is not None:
-            logging.info("Skipping weight histograms for JIT model.")
+            log_event("weight_histograms_skipped", reason="jit_model")
             return
         layer_names = self.model.get_layer_names()
         name_to_module = dict(self.model.named_modules())
         for layer_name in layer_names:
             module = name_to_module.get(layer_name)
             if module is None or not hasattr(module, "weight"):
-                logging.debug("Skipping %s: no such layer or no weights", layer_name)
+                log_event(
+                    "layer_skipped",
+                    level="DEBUG",
+                    layer=layer_name,
+                    reason="missing_or_no_weights",
+                )
                 continue
             weights = module.weight.detach().cpu().flatten().numpy()
             mean_val = float(weights.mean())
@@ -167,7 +191,7 @@ class Benchmark:
     def run(self):
         """Run benchmark evaluation and save visualizations."""
         loss_mAP, sample_images, sample_labels, sample_preds = self._compute()
-        logging.info("mAP: %.4f", loss_mAP)
+        log_event("benchmark_result", accuracy=float(loss_mAP))
         if sample_images is not None:
             out_path = self._make_plot(
                 self.save_as,
@@ -175,7 +199,7 @@ class Benchmark:
                 sample_labels.tolist(),
                 sample_preds.tolist(),
             )
-            logging.info("Saved plot: %s", out_path)
+            log_event("plot_saved", path=out_path)
 
         if self.layers_to_investigate:
             self.plot_weight_histograms()
