@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import json
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -137,7 +139,12 @@ class LayerWiseOptimizer(ABC):
         Returns:
             The optimized model copy and the sensitivity report used to select layers.
         """
-        active_report = report if report is not None else self.evaluate_sensitivity()
+        active_report = report
+        if active_report is None:
+            active_report = self._load_sensitivity_report_from_recipes()
+        if active_report is None:
+            active_report = self.evaluate_sensitivity()
+
         selected_layers = self.select_layers(active_report)
         optimized_model = self._clone_model().to(self.device)
 
@@ -149,6 +156,20 @@ class LayerWiseOptimizer(ABC):
             )
 
         return optimized_model, active_report
+
+    def read_allowed_pruning_layers(
+        self,
+        path: str | Path,
+    ) -> list[str]:
+        """
+        Read a sensitivity recipe file and return prune-eligible layer names.
+
+        Supported inputs are either a JSON object keyed by layer name or JSON/JSONL
+        event records that expose layer decisions through fields such as
+        ``layer``/``status`` or ``layer``/``recommended``.
+        """
+        report = self._read_sensitivity_report(path)
+        return self.select_layers(report)
 
     def _compute_accuracy(self, model: nn.Module) -> float:
         """
@@ -322,6 +343,192 @@ class LayerWiseOptimizer(ABC):
         """Return a config value, treating ``None`` as missing."""
         value = self.optimizer_config.get(name)
         return default if value is None else value
+
+    def _recipes_path(self) -> str | None:
+        """Return the configured sensitivity recipe path, if any."""
+        recipes_path = self._config_value("recipes", None)
+        if recipes_path is None:
+            recipes_path = self.config.get("recipes")
+        if recipes_path is None:
+            return None
+        return str(recipes_path)
+
+    def _load_sensitivity_report_from_recipes(self) -> SensitivityReport | None:
+        """Load a sensitivity report from the configured recipes file."""
+        recipes_path = self._recipes_path()
+        if not recipes_path:
+            return None
+        report = self._read_sensitivity_report(recipes_path)
+        self._last_report = report
+        return report
+
+    def _read_sensitivity_report(self, path: str | Path) -> SensitivityReport:
+        """Read a sensitivity report from JSON or JSONL."""
+        report_path = Path(path)
+        if not report_path.exists():
+            raise FileNotFoundError(
+                f"Sensitivity analysis recipes file not found: {report_path}"
+            )
+
+        raw_data = self._load_json_or_jsonl(report_path)
+        return self._normalize_sensitivity_report(raw_data)
+
+    def _load_json_or_jsonl(self, path: Path) -> Any:
+        """Read a JSON object/array or a JSONL stream from disk."""
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            raise ValueError(f"Sensitivity analysis recipes file is empty: {path}")
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            records: list[dict[str, Any]] = []
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Invalid JSON in recipes file {path} at line {line_number}."
+                    ) from exc
+                if not isinstance(record, dict):
+                    raise ValueError(
+                        f"Recipes JSONL file {path} must contain JSON objects only."
+                    )
+                records.append(record)
+
+            if not records:
+                raise ValueError(f"Sensitivity analysis recipes file is empty: {path}")
+            return records
+
+    def _normalize_sensitivity_report(self, raw_data: Any) -> SensitivityReport:
+        """Convert supported recipe payloads into a sensitivity report."""
+        if isinstance(raw_data, dict):
+            return self._report_from_mapping(raw_data)
+        if isinstance(raw_data, list):
+            return self._report_from_records(raw_data)
+        raise ValueError("Unsupported recipes format for sensitivity analysis.")
+
+    def _report_from_mapping(self, raw_data: dict[str, Any]) -> SensitivityReport:
+        """Build a sensitivity report from a mapping payload."""
+        if "report" in raw_data and isinstance(raw_data["report"], dict):
+            raw_data = raw_data["report"]
+
+        if "layers" in raw_data and isinstance(raw_data["layers"], (dict, list)):
+            layers_payload = raw_data["layers"]
+            if isinstance(layers_payload, dict):
+                return self._report_from_mapping(layers_payload)
+            return self._report_from_records(layers_payload)
+
+        report: SensitivityReport = {}
+        candidate_layers = set(self._get_candidate_layers())
+        for layer_name, layer_report in raw_data.items():
+            if not isinstance(layer_name, str):
+                continue
+            if candidate_layers and layer_name not in candidate_layers:
+                continue
+            if not isinstance(layer_report, dict):
+                continue
+            report[layer_name] = self._normalize_layer_report(layer_name, layer_report)
+
+        if report:
+            return report
+        raise ValueError("Recipes file does not contain a valid sensitivity report.")
+
+    def _report_from_records(self, records: list[Any]) -> SensitivityReport:
+        """Build a sensitivity report from event-style records."""
+        report: SensitivityReport = {}
+        candidate_layers = set(self._get_candidate_layers())
+
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            layer_name = record.get("layer") or record.get("layer_name")
+            if not isinstance(layer_name, str):
+                continue
+            if candidate_layers and layer_name not in candidate_layers:
+                continue
+            report[layer_name] = self._normalize_layer_report(layer_name, record)
+
+        if report:
+            return report
+        raise ValueError("Recipes file does not contain any recognized layer entries.")
+
+    def _normalize_layer_report(
+        self,
+        layer_name: str,
+        raw_report: dict[str, Any],
+    ) -> LayerReport:
+        """Normalize one layer decision record into the standard report schema."""
+        recommended = self._recommended_from_layer_report(raw_report)
+        baseline_accuracy = self._float_or_default(
+            raw_report.get("baseline_accuracy"),
+            0.0,
+        )
+        optimized_accuracy = self._float_or_default(
+            raw_report.get("optimized_accuracy"),
+            baseline_accuracy,
+        )
+        accuracy_drop = self._float_or_default(
+            raw_report.get("accuracy_drop"),
+            baseline_accuracy - optimized_accuracy,
+        )
+        reason = str(
+            raw_report.get(
+                "reason",
+                WITHIN_MAX_ACCURACY_DROP
+                if recommended
+                else EXCEEDS_MAX_ACCURACY_DROP,
+            )
+        )
+
+        normalized: LayerReport = {
+            "recommended": recommended,
+            "baseline_accuracy": baseline_accuracy,
+            "optimized_accuracy": optimized_accuracy,
+            "accuracy_drop": accuracy_drop,
+            "reason": reason,
+        }
+        if "error" in raw_report:
+            normalized["error"] = str(raw_report["error"])
+        normalized["layer"] = layer_name
+        return normalized
+
+    def _recommended_from_layer_report(self, raw_report: dict[str, Any]) -> bool:
+        """Infer whether a layer is allowed for pruning from a raw record."""
+        if "recommended" in raw_report:
+            return self._bool_value(raw_report["recommended"])
+        if "allow_pruning" in raw_report:
+            return self._bool_value(raw_report["allow_pruning"])
+        if "allowed_for_pruning" in raw_report:
+            return self._bool_value(raw_report["allowed_for_pruning"])
+
+        status = raw_report.get("status")
+        if isinstance(status, str):
+            return status.lower() in {"selected", "recommended", "allowed", "keep"}
+
+        reason = raw_report.get("reason")
+        if isinstance(reason, str):
+            return reason == WITHIN_MAX_ACCURACY_DROP
+
+        return False
+
+    def _float_or_default(self, value: Any, default: float) -> float:
+        """Return a float value or a fallback when conversion is not possible."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _bool_value(self, value: Any) -> bool:
+        """Return a stable boolean for native or string-like JSON values."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
 
     def _unpack_batch(self, batch: Any) -> tuple[Any, Any]:
         """Validate and unpack one dataloader batch."""
