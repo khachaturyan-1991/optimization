@@ -49,6 +49,11 @@ def _append_log(message: str) -> None:
     st.session_state.prune_logs = logs[-12:]
 
 
+def _uploaded_file_signature(uploaded_file: Any) -> tuple[str, int]:
+    """Return a stable signature for one uploaded file selection."""
+    return (str(getattr(uploaded_file, "name", "")), len(uploaded_file.getbuffer()))
+
+
 def _reset_prune_workflow() -> None:
     """Clear analysis and result state after model changes."""
     st.session_state.prune_analysis_data = None
@@ -142,13 +147,17 @@ def _load_base_config() -> dict[str, Any]:
         return cast(dict[str, Any], yaml.safe_load(file) or {})
 
 
-def _build_runtime_config(*, require_output_path: bool) -> dict[str, Any]:
+def _build_runtime_config(
+    *,
+    require_output_path: bool,
+    sparsity_key: str = "prune_analysis_sparsity",
+) -> dict[str, Any]:
     """Map current UI values to the pruning config structure."""
     if not st.session_state.prune_model_runtime_path:
         raise ValueError("Load model weights before running analysis or pruning.")
 
     try:
-        sparsity = float(st.session_state.prune_sparsity)
+        sparsity = float(st.session_state[sparsity_key])
     except ValueError as exc:
         raise ValueError("Sparsity must be a valid number.") from exc
 
@@ -310,8 +319,12 @@ def _load_previous_analysis(uploaded_file: Any) -> None:
 
 def _run_analysis() -> None:
     """Execute sensitivity analysis and persist the structured JSON result."""
+    st.session_state.prune_run_error = None
     prune_api = _get_prune_api()
-    config = _build_runtime_config(require_output_path=False)
+    config = _build_runtime_config(
+        require_output_path=False,
+        sparsity_key="prune_analysis_sparsity",
+    )
 
     with st.spinner("Running sensitivity analysis..."):
         result = prune_api.analyze_with_config(config)
@@ -327,8 +340,12 @@ def _run_pruning() -> None:
     if not protected_layers:
         raise ValueError("Define at least one protected layer before pruning.")
 
+    st.session_state.prune_run_error = None
     prune_api = _get_prune_api()
-    config = _build_runtime_config(require_output_path=True)
+    config = _build_runtime_config(
+        require_output_path=True,
+        sparsity_key="prune_analysis_sparsity",
+    )
 
     with st.spinner("Running structured pruning..."):
         result = prune_api.prune_with_protected_layers(config, protected_layers)
@@ -344,6 +361,9 @@ def _render_model_section() -> None:
     load_clicked = st.button("Load Weights", key="prune_load_weights")
     if load_clicked:
         st.session_state.show_prune_model_uploader = True
+        st.session_state.prune_model_upload_signature = None
+        st.session_state.prune_model_error = None
+        st.session_state.pop("prune_model_uploader", None)
 
     if st.session_state.show_prune_model_uploader:
         uploaded_model = st.file_uploader(
@@ -353,10 +373,14 @@ def _render_model_section() -> None:
             key="prune_model_uploader",
         )
         if uploaded_model is not None:
-            try:
-                _inspect_model(uploaded_model)
-            except Exception as exc:
-                st.session_state.prune_model_error = f"Failed to load model: {exc}"
+            signature = _uploaded_file_signature(uploaded_model)
+            if signature != st.session_state.get("prune_model_upload_signature"):
+                st.session_state.prune_model_upload_signature = signature
+                try:
+                    _inspect_model(uploaded_model)
+                    st.session_state.show_prune_model_uploader = False
+                except Exception as exc:
+                    st.session_state.prune_model_error = f"Failed to load model: {exc}"
 
     if st.session_state.prune_model_error:
         st.error(st.session_state.prune_model_error)
@@ -373,22 +397,16 @@ def _render_model_section() -> None:
 
     with st.expander("Model architecture", expanded=False):
         for layer in st.session_state.prune_model_layers:
-            details = []
-            if layer["input_shape"]:
-                details.append(f"in {layer['input_shape']}")
-            if layer["output_shape"]:
-                details.append(f"out {layer['output_shape']}")
-            suffix = f" | {' | '.join(details)}" if details else ""
-            st.markdown(f"`{layer['name']}`  \n{layer['type']}{suffix}")
+            st.markdown(f"`{layer['name']}`")
 
 
 def _render_analysis_section() -> None:
     """Render section 2: optional analysis and review."""
-    st.markdown("### 2. Analysis")
+    st.markdown("### 2. Sensetivity analyses")
     st.caption("Estimate sensitivity and suggest layers to protect.")
 
     disabled = not bool(st.session_state.prune_model_runtime_path)
-    action_col1, action_col2, action_col3 = st.columns([2.4, 1.4, 2.0])
+    action_col1, action_col2, action_col3, action_col4 = st.columns([1.8, 1.8, 1.4, 2.0])
     with action_col1:
         st.text_input(
             "Threshold",
@@ -396,18 +414,27 @@ def _render_analysis_section() -> None:
             help="Equivalent to pruning.max_accuracy_drop for the analysis step.",
         )
     with action_col2:
+        st.text_input(
+            "Sparsity",
+            key="prune_analysis_sparsity",
+            help="Equivalent to pruning.ch_sparsity for the analysis step.",
+        )
+    with action_col3:
         if st.button("Run Analysis", key="prune_run_analysis", disabled=disabled):
             try:
                 _run_analysis()
             except Exception as exc:
                 st.session_state.prune_run_error = str(exc)
-    with action_col3:
+    with action_col4:
         if st.button(
             "Load Previous Analysis",
             key="prune_load_analysis",
             disabled=disabled,
         ):
             st.session_state.show_prune_analysis_loader = True
+            st.session_state.prune_analysis_upload_signature = None
+            st.session_state.prune_analysis_import_error = None
+            st.session_state.pop("prune_analysis_uploader", None)
 
     if st.session_state.show_prune_analysis_loader:
         uploaded_analysis = st.file_uploader(
@@ -417,10 +444,14 @@ def _render_analysis_section() -> None:
             key="prune_analysis_uploader",
         )
         if uploaded_analysis is not None:
-            try:
-                _load_previous_analysis(uploaded_analysis)
-            except Exception as exc:
-                st.session_state.prune_analysis_import_error = str(exc)
+            signature = _uploaded_file_signature(uploaded_analysis)
+            if signature != st.session_state.get("prune_analysis_upload_signature"):
+                st.session_state.prune_analysis_upload_signature = signature
+                try:
+                    _load_previous_analysis(uploaded_analysis)
+                    st.session_state.show_prune_analysis_loader = False
+                except Exception as exc:
+                    st.session_state.prune_analysis_import_error = str(exc)
 
     if st.session_state.prune_analysis_import_error:
         st.error(st.session_state.prune_analysis_import_error)
@@ -509,9 +540,8 @@ def _render_protected_layers_section() -> None:
 def _render_pruning_section() -> None:
     """Render section 4: explicit pruning action."""
     st.markdown("### 4. Pruning")
-    settings_col1, settings_col2 = st.columns(2)
-    settings_col1.text_input("Sparsity", key="prune_sparsity")
-    settings_col2.text_input("Output model path", key="prune_output_model")
+    st.text_input("Output model path", key="prune_output_model")
+    st.caption("Pruning uses the sparsity value from section 2.")
 
     disabled = not bool(st.session_state.prune_model_runtime_path) or not bool(
         st.session_state.prune_protected_layers

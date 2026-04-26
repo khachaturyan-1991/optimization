@@ -16,7 +16,7 @@ def init_state() -> None:
     st.session_state.setdefault("show_uploader", False)
     st.session_state.setdefault("project_action", None)
     st.session_state.setdefault("current_screen", "landing")
-    st.session_state.setdefault("prune_sparsity", "0.3")
+    st.session_state.setdefault("prune_analysis_sparsity", "0.3")
     st.session_state.setdefault("prune_analysis_threshold", "0.1")
     st.session_state.setdefault("prune_output_model", "")
     st.session_state.setdefault("prune_model_file", None)
@@ -36,6 +36,8 @@ def init_state() -> None:
     st.session_state.setdefault("prune_protected_layers_input", "")
     st.session_state.setdefault("prune_results", None)
     st.session_state.setdefault("show_prune_analysis_loader", False)
+    st.session_state.setdefault("prune_model_upload_signature", None)
+    st.session_state.setdefault("prune_analysis_upload_signature", None)
 
 
 def set_uploaded_file(file_name: str, file_path: str | None = None) -> None:

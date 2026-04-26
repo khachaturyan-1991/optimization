@@ -1,11 +1,13 @@
 """Data loader utilities for CIFAR-10."""
 
+import warnings
+from typing import Any, Dict
+
+import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
 import torchvision
 import torchvision.transforms as transforms
-
-from typing import Dict
+from torch.utils.data import DataLoader, Subset
 
 
 class DataLoder:
@@ -36,11 +38,15 @@ class DataLoder:
             ])
             dataset_class = torchvision.datasets.CIFAR10
 
-        train_set = dataset_class(
-            root=self.data_dir, train=True, download=True, transform=transform
+        train_set = self._load_dataset(
+            dataset_class,
+            train=True,
+            transform=transform,
         )
-        test_set = dataset_class(
-            root=self.data_dir, train=False, download=True, transform=transform
+        test_set = self._load_dataset(
+            dataset_class,
+            train=False,
+            transform=transform,
         )
 
         if num_train > 0:
@@ -55,3 +61,22 @@ class DataLoder:
         test_loader = DataLoader(test_set, batch_size=test_bs, shuffle=False)
 
         return train_loader, test_loader
+
+    def _load_dataset(self, dataset_class: type, *, train: bool, transform: Any):
+        """Construct one dataset and suppress the known NumPy 2.4 CIFAR warning."""
+        warning_category = getattr(np, "VisibleDeprecationWarning", Warning)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=(
+                    r"dtype\(\): align should be passed as Python or NumPy boolean "
+                    r"but got `align=0`.*"
+                ),
+                category=warning_category,
+            )
+            return dataset_class(
+                root=self.data_dir,
+                train=train,
+                download=True,
+                transform=transform,
+            )

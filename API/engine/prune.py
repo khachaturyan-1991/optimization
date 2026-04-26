@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import glob
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -356,6 +357,12 @@ def _write_pruning_summary(
     record = build_event_record("pruning_summary", **fields)
     write_json(summary_path, record)
     log_event("pruning_summary", **fields)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """Read one JSON object from disk."""
+    with path.open("r", encoding="utf-8") as file:
+        return json.load(file)
 
 
 def _artifact_paths(run_dir: Path) -> tuple[Path, Path]:
