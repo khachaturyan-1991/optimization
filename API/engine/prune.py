@@ -56,6 +56,7 @@ except ModuleNotFoundError:
 
 LAYER_DECISIONS_FILE = "layer_decisions.jsonl"
 PRUNING_SUMMARY_FILE = "pruning_summary.json"
+ANALYSIS_RESULT_FILE = "analysis_result.json"
 
 
 class PruningOptimizer(LayerWiseOptimizer):
@@ -365,23 +366,140 @@ def _artifact_paths(run_dir: Path) -> tuple[Path, Path]:
     )
 
 
-def prune_with_config(cfg: dict[str, Any]) -> None:
-    """Run layer-wise pruning from a loaded application config."""
-    run_dir = ensure_json_logging(cfg, workflow="prune")
-    layer_decisions_path, summary_path = _artifact_paths(run_dir)
-    _reset_jsonl(layer_decisions_path)
+def _analysis_result_path(run_dir: Path) -> Path:
+    """Return the structured analysis artifact path for the current run."""
+    return run_dir / ANALYSIS_RESULT_FILE
 
+
+def _build_analysis_result(
+    report: SensitivityReport,
+    protected_layers: list[str],
+) -> dict[str, Any]:
+    """Build a structured sensitivity-analysis payload for UI consumption."""
+    configured_protected_set = {str(layer_name) for layer_name in protected_layers}
+    suggested_protected_layers = list(configured_protected_set)
+
+    for layer_name, layer_report in report.items():
+        if not bool(layer_report.get("recommended", False)):
+            if layer_name not in configured_protected_set:
+                suggested_protected_layers.append(layer_name)
+
+    suggested_protected_set = set(suggested_protected_layers)
+    layers: list[dict[str, Any]] = []
+    for layer_name, layer_report in report.items():
+        layers.append(
+            {
+                "layer": layer_name,
+                "accuracy_drop": float(layer_report.get("accuracy_drop", 0.0)),
+                "reason": str(layer_report.get("reason", "")),
+                "allowed_for_pruning": bool(layer_report.get("recommended", False)),
+                "suggested_protected": layer_name in suggested_protected_set,
+                "baseline_accuracy": float(layer_report.get("baseline_accuracy", 0.0)),
+                "optimized_accuracy": float(
+                    layer_report.get("optimized_accuracy", 0.0)
+                ),
+                "error": str(layer_report.get("error", "")) if layer_report.get("error") else None,
+            }
+        )
+
+    return build_event_record(
+        "analysis_result",
+        protected_layers=suggested_protected_layers,
+        layers=layers,
+    )
+
+
+def _write_analysis_result(
+    analysis_path: Path,
+    report: SensitivityReport,
+    protected_layers: list[str],
+) -> dict[str, Any]:
+    """Write the structured analysis payload to JSON and return it."""
+    record = _build_analysis_result(report, protected_layers)
+    write_json(analysis_path, record)
+    return record
+
+
+def _explicit_selection_report(
+    optimizer: PruningOptimizer,
+    protected_layers: list[str],
+) -> SensitivityReport:
+    """Build a transparent report for explicit UI-driven pruning choices."""
+    protected_set = {str(layer_name) for layer_name in protected_layers}
+    report: SensitivityReport = {}
+    for layer_name, module in optimizer.model.named_modules():
+        if not layer_name:
+            continue
+        if not isinstance(module, optimizer.supported_layer_types):
+            continue
+        if not optimizer._has_weights(module):
+            continue
+        recommended = layer_name not in protected_set
+        report[layer_name] = {
+            "recommended": recommended,
+            "baseline_accuracy": 0.0,
+            "optimized_accuracy": 0.0,
+            "accuracy_drop": 0.0,
+            "reason": (
+                "explicit_user_selection"
+                if recommended
+                else "explicit_user_protected_layer"
+            ),
+        }
+    return report
+
+
+def _create_runtime_pruning_context(
+    cfg: dict[str, Any],
+) -> tuple[dict[str, Any], nn.Module, Any, str]:
+    """Load the configured model, runtime config, dataloader, and checkpoint path."""
     ckpt_path = _checkpoint_path(cfg)
-
     model = _load_model_for_pruning(cfg, ckpt_path)
     runtime_cfg = _config_with_default_ignored_layers(cfg, model)
     _, test_dataloader = DataLoder(runtime_cfg["data"]).get_dataloaders()
+    return runtime_cfg, model, test_dataloader, ckpt_path
 
-    pruning_cfg = runtime_cfg.get("pruning", {}) or {}
+
+def analyze_with_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Run sensitivity analysis only and persist a structured JSON report."""
+    run_dir = ensure_json_logging(cfg, workflow="prune-analysis")
+    analysis_path = _analysis_result_path(run_dir)
+
+    runtime_cfg, model, test_dataloader, _ = _create_runtime_pruning_context(cfg)
+    protected_layers = [
+        str(layer_name)
+        for layer_name in runtime_cfg.get("pruning", {}).get("ignore_layers", []) or []
+    ]
+
+    optimizer = PruningOptimizer(
+        model=model,
+        dataloader=test_dataloader,
+        metric_fn=_classification_accuracy,
+        config=runtime_cfg,
+    )
+    report = optimizer.evaluate_sensitivity()
+    result = _write_analysis_result(analysis_path, report, protected_layers)
+    log_event("analysis_saved", path=analysis_path)
+    return {"run_dir": str(run_dir), "analysis_path": str(analysis_path), "result": result}
+
+
+def prune_with_protected_layers(
+    cfg: dict[str, Any],
+    protected_layers: list[str],
+) -> dict[str, Any]:
+    """Run pruning using exactly the provided protected-layer list."""
+    runtime_cfg, model, test_dataloader, ckpt_path = _create_runtime_pruning_context(cfg)
+    pruning_cfg = runtime_cfg.setdefault("pruning", {})
+    pruning_cfg["checkpoint_path"] = ckpt_path
+    pruning_cfg["ignore_layers"] = [str(layer_name) for layer_name in protected_layers]
+
+    run_dir = ensure_json_logging(runtime_cfg, workflow="prune")
+    layer_decisions_path, summary_path = _artifact_paths(run_dir)
+    _reset_jsonl(layer_decisions_path)
+
     output_path = str(pruning_cfg.get("output_path", "pruned_model.pt"))
-    ignored_layers = pruning_cfg.get("ignore_layers", []) or []
-    if ignored_layers:
-        log_event("layers_ignored", layers=[str(layer) for layer in ignored_layers])
+    if protected_layers:
+        log_event("layers_protected", layers=[str(layer) for layer in protected_layers])
 
     before_params = _count_params(model)
     optimizer = PruningOptimizer(
@@ -390,14 +508,40 @@ def prune_with_config(cfg: dict[str, Any]) -> None:
         metric_fn=_classification_accuracy,
         config=runtime_cfg,
     )
-    pruned_model, report = optimizer.optimize()
+    selected_layers = optimizer._get_candidate_layers()
+    pruned_model = optimizer._clone_model().to(optimizer.device)
+    if selected_layers:
+        pruned_model = optimizer._apply_optimization(
+            pruned_model,
+            selected_layers,
+            optimizer.final_sparsity,
+        )
+    report = _explicit_selection_report(optimizer, protected_layers)
     after_params = _count_params(pruned_model)
 
     _log_report(report, layer_decisions_path)
     _write_pruning_summary(summary_path, before_params, after_params)
-
     _save_pruned_model(pruned_model, output_path, test_dataloader)
     log_event("model_saved", path=output_path)
+
+    summary_record = _read_json(summary_path)
+    return {
+        "run_dir": str(run_dir),
+        "output_path": output_path,
+        "summary_path": str(summary_path),
+        "layer_decisions_path": str(layer_decisions_path),
+        "summary": summary_record,
+        "report": report,
+    }
+
+
+def prune_with_config(cfg: dict[str, Any]) -> None:
+    """Run layer-wise pruning from a loaded application config."""
+    protected_layers = [
+        str(layer_name)
+        for layer_name in (cfg.get("pruning", {}) or {}).get("ignore_layers", []) or []
+    ]
+    prune_with_protected_layers(cfg, protected_layers)
 
 
 def main() -> None:

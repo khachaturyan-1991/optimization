@@ -1,23 +1,22 @@
-"""Pruning controls for the Streamlit UI."""
+"""Guided pruning workflow for the Streamlit UI."""
+
+from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, is_dataclass
-from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Any, cast
 
 import streamlit as st
+import torch
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "API" / "data" / "configs" / "config.yml"
-LAYER_DECISIONS_FILE = "layer_decisions.jsonl"
-PRUNING_SUMMARY_FILE = "pruning_summary.json"
 
 
 def _get_loader_torch_jit() -> type[Any]:
@@ -29,14 +28,41 @@ def _get_loader_torch_jit() -> type[Any]:
     return cast(type[Any], getattr(module, "LoaderTorchJit"))
 
 
-def _format_shape(shape) -> str | None:
+def _get_prune_api() -> Any:
+    """Return the pruning module used by the UI workflow."""
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    return import_module("API.engine.prune")
+
+
+def _format_shape(shape: Any) -> str | None:
     """Render a layer shape tuple in a compact display form."""
     if not shape:
         return None
     return "x".join("?" if dim is None else str(dim) for dim in shape)
 
 
-def extract_layers(loader: Any) -> list[dict[str, str | None]]:
+def _append_log(message: str) -> None:
+    """Append a short message to the read-only prune log."""
+    logs = list(st.session_state.prune_logs)
+    logs.append(message)
+    st.session_state.prune_logs = logs[-12:]
+
+
+def _reset_prune_workflow() -> None:
+    """Clear analysis and result state after model changes."""
+    st.session_state.prune_analysis_data = None
+    st.session_state.prune_analysis_json = None
+    st.session_state.prune_analysis_path = None
+    st.session_state.prune_analysis_import_error = None
+    st.session_state.prune_results = None
+    st.session_state.prune_run_error = None
+    st.session_state.prune_run_output = None
+    st.session_state.prune_protected_layers = []
+    st.session_state.prune_protected_layers_input = ""
+
+
+def _layers_from_loader(loader: Any) -> list[dict[str, str | None]]:
     """Normalize loader graph details for the prune UI."""
     layers: list[dict[str, str | None]] = []
     for layer in loader.get_details().graph:
@@ -67,10 +93,9 @@ def extract_layers(loader: Any) -> list[dict[str, str | None]]:
     return layers
 
 
-def inspect_uploaded_model(uploaded_model) -> None:
+def _inspect_model(uploaded_model: Any) -> None:
     """Persist the uploaded TorchScript file and inspect its modules."""
     suffix = Path(uploaded_model.name).suffix or ".pt"
-
     previous_path = st.session_state.prune_model_runtime_path
     if previous_path and os.path.exists(previous_path):
         os.unlink(previous_path)
@@ -82,247 +107,467 @@ def inspect_uploaded_model(uploaded_model) -> None:
     try:
         loader_class = _get_loader_torch_jit()
         loader = loader_class(temp_path)
-        st.session_state.prune_model_layers = extract_layers(loader)
-        st.session_state.prune_model_error = None
+        layers = _layers_from_loader(loader)
+
+        try:
+            loaded_model = torch.jit.load(temp_path, map_location="cpu")
+            param_count = sum(parameter.numel() for parameter in loaded_model.parameters())
+        except Exception:
+            param_count = None
+
         st.session_state.prune_model_runtime_path = temp_path
+        st.session_state.prune_model_file = uploaded_model.name
+        st.session_state.prune_model_layers = layers
+        st.session_state.prune_model_summary = {
+            "model_path": uploaded_model.name,
+            "layer_count": len(layers),
+            "param_count": param_count,
+        }
+        st.session_state.prune_model_error = None
+        _reset_prune_workflow()
+        _append_log(f"Loaded weights: {uploaded_model.name}")
     except Exception:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
         st.session_state.prune_model_runtime_path = None
+        st.session_state.prune_model_layers = []
+        st.session_state.prune_model_summary = None
         raise
 
 
-def load_base_config() -> dict:
+def _load_base_config() -> dict[str, Any]:
     """Load the base config used to construct prune runs."""
     config_path = st.session_state.selected_config_runtime_path or str(DEFAULT_CONFIG_PATH)
     with open(config_path, "r", encoding="utf-8") as file:
-        return yaml.safe_load(file)
+        return cast(dict[str, Any], yaml.safe_load(file) or {})
 
 
-def build_prune_config() -> dict:
-    """Map UI fields to the pruning config structure."""
+def _build_runtime_config(*, require_output_path: bool) -> dict[str, Any]:
+    """Map current UI values to the pruning config structure."""
     if not st.session_state.prune_model_runtime_path:
-        raise ValueError("Please upload a model file before pruning.")
+        raise ValueError("Load model weights before running analysis or pruning.")
 
     try:
         sparsity = float(st.session_state.prune_sparsity)
     except ValueError as exc:
         raise ValueError("Sparsity must be a valid number.") from exc
 
+    try:
+        analysis_threshold = float(st.session_state.prune_analysis_threshold)
+    except ValueError as exc:
+        raise ValueError("Analysis threshold must be a valid number.") from exc
+
     if not 0.0 <= sparsity < 1.0:
         raise ValueError("Sparsity must be in the range [0.0, 1.0).")
+    if analysis_threshold < 0.0:
+        raise ValueError("Analysis threshold must be greater than or equal to 0.0.")
 
-    output_model = st.session_state.prune_output_model.strip()
-    if not output_model:
-        raise ValueError("Please enter an output model path.")
-
-    config = load_base_config()
+    config = _load_base_config()
     pruning_config = config.setdefault("pruning", {})
     pruning_config["ch_sparsity"] = sparsity
+    pruning_config["final_sparsity"] = sparsity
+    pruning_config["max_accuracy_drop"] = analysis_threshold
     pruning_config["checkpoint_path"] = st.session_state.prune_model_runtime_path
-    pruning_config["output_path"] = output_model
-    pruning_config["ignore_layers"] = list(st.session_state.prune_ignore_layers)
+    output_model = st.session_state.prune_output_model.strip()
+    if require_output_path:
+        if not output_model:
+            raise ValueError("Enter an output model path.")
+        pruning_config["output_path"] = output_model
+    elif output_model:
+        pruning_config["output_path"] = output_model
     return config
 
 
-def _new_prune_run_dir() -> Path:
-    """Return a unique run directory for a UI-launched pruning job."""
-    run_id = datetime.now().strftime("prune-%Y%m%d-%H%M%S-%f")
-    return PROJECT_ROOT / "runs" / run_id
+def _format_param_count(value: int | None) -> str:
+    """Render a parameter count for display."""
+    if value is None:
+        return "Unknown"
+    return f"{value:,}"
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    """Load a structured JSON artifact."""
-    with path.open("r", encoding="utf-8") as file:
-        return cast(dict[str, Any], json.load(file))
+def _format_ratio(value: float | None) -> str:
+    """Render a ratio as a percentage string."""
+    if value is None:
+        return "Unknown"
+    return f"{value * 100:.2f}%"
 
 
-def run_pruning() -> None:
-    """Run the existing pruning CLI with a generated config file."""
-    config = build_prune_config()
-    pruning_config = config["pruning"]
-    run_dir = _new_prune_run_dir()
-    logging_config = config.setdefault("logging", {})
-    logging_config["run_dir"] = str(run_dir)
-    logging_config.setdefault("console", False)
+def _parse_protected_layers(text: str) -> list[str]:
+    """Parse comma or newline separated protected-layer names."""
+    layers: list[str] = []
+    for token in text.replace("\n", ",").split(","):
+        layer_name = token.strip()
+        if layer_name and layer_name not in layers:
+            layers.append(layer_name)
+    return layers
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", delete=False, suffix=".yml", encoding="utf-8"
-    ) as temp_config:
-        yaml.safe_dump(config, temp_config, sort_keys=False)
-        temp_config_path = temp_config.name
 
-    try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(PROJECT_ROOT / "API" / "engine" / "main.py"),
-                "--prune",
-                "--config",
-                temp_config_path,
-            ],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        if os.path.exists(temp_config_path):
-            os.unlink(temp_config_path)
-
-    combined_output = "\n".join(
-        part for part in [result.stdout.strip(), result.stderr.strip()] if part
+def _sync_protected_layers_input() -> None:
+    """Update the visible protected-layer field from canonical state."""
+    st.session_state.prune_protected_layers_input = ", ".join(
+        st.session_state.prune_protected_layers
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(combined_output or "Pruning failed.")
 
-    summary_path = run_dir / PRUNING_SUMMARY_FILE
-    layer_decisions_path = run_dir / LAYER_DECISIONS_FILE
-    summary_record = _read_json(summary_path) if summary_path.exists() else {}
+def _set_protected_layers(layers: list[str]) -> None:
+    """Replace the protected-layer selection and sync the input field."""
+    st.session_state.prune_protected_layers = list(dict.fromkeys(layers))
+    _sync_protected_layers_input()
 
+
+def _analysis_layers() -> list[dict[str, Any]]:
+    """Return analysis rows from session state."""
+    data = st.session_state.prune_analysis_data or {}
+    layers = data.get("layers", [])
+    return layers if isinstance(layers, list) else []
+
+
+def _protected_layers_from_analysis(data: dict[str, Any]) -> list[str]:
+    """Extract the suggested protected layers from an analysis payload."""
+    configured = data.get("protected_layers")
+    if isinstance(configured, list):
+        return [str(layer) for layer in configured if str(layer).strip()]
+
+    layers: list[str] = []
+    for entry in data.get("layers", []):
+        if not isinstance(entry, dict):
+            continue
+        if bool(entry.get("suggested_protected")):
+            layer_name = str(entry.get("layer", "")).strip()
+            if layer_name and layer_name not in layers:
+                layers.append(layer_name)
+    return layers
+
+
+def _set_analysis_data(data: dict[str, Any], *, source_path: str | None = None) -> None:
+    """Persist an analysis payload and sync the protected-layer selection."""
+    st.session_state.prune_analysis_data = data
+    st.session_state.prune_analysis_json = json.dumps(data, indent=2)
+    st.session_state.prune_analysis_path = source_path
+    st.session_state.prune_analysis_import_error = None
+    _set_protected_layers(_protected_layers_from_analysis(data))
+
+
+def _checkbox_key(layer_name: str) -> str:
+    """Return the checkbox key for one layer row."""
+    sanitized = layer_name.replace(".", "_").replace("[", "_").replace("]", "_")
+    return f"prune_protected_{sanitized}"
+
+
+def _apply_text_field_selection() -> None:
+    """Sync manual protected-layer edits into the row selection state."""
+    layers = _parse_protected_layers(st.session_state.prune_protected_layers_input)
+    _set_protected_layers(layers)
+
+
+def _apply_checkbox_selection() -> None:
+    """Rebuild protected layers from row checkboxes and sync the text field."""
+    layers: list[str] = []
+    for entry in _analysis_layers():
+        layer_name = str(entry.get("layer", "")).strip()
+        if not layer_name:
+            continue
+        if bool(st.session_state.get(_checkbox_key(layer_name), False)):
+            layers.append(layer_name)
+    _set_protected_layers(layers)
+
+
+def _set_selection_mode(mode: str) -> None:
+    """Apply one of the quick selection actions to the current analysis rows."""
+    current = set(st.session_state.prune_protected_layers)
+    suggested = {
+        str(entry.get("layer", "")).strip()
+        for entry in _analysis_layers()
+        if bool(entry.get("suggested_protected"))
+    }
+    all_layers = {
+        str(entry.get("layer", "")).strip()
+        for entry in _analysis_layers()
+        if str(entry.get("layer", "")).strip()
+    }
+
+    if mode == "suggested":
+        next_layers = [layer for layer in suggested if layer]
+    elif mode == "clear":
+        next_layers = []
+    elif mode == "invert":
+        next_layers = [layer for layer in all_layers if layer and layer not in current]
+    else:
+        next_layers = list(current)
+
+    _set_protected_layers(sorted(next_layers))
+
+
+def _load_previous_analysis(uploaded_file: Any) -> None:
+    """Read and validate a structured analysis JSON file."""
+    payload = cast(dict[str, Any], json.loads(uploaded_file.getvalue().decode("utf-8")))
+    layers = payload.get("layers")
+    if not isinstance(layers, list):
+        raise ValueError("Analysis JSON must contain a top-level 'layers' list.")
+    _set_analysis_data(payload, source_path=uploaded_file.name)
+    _append_log(f"Loaded previous analysis: {uploaded_file.name}")
+
+
+def _run_analysis() -> None:
+    """Execute sensitivity analysis and persist the structured JSON result."""
+    prune_api = _get_prune_api()
+    config = _build_runtime_config(require_output_path=False)
+
+    with st.spinner("Running sensitivity analysis..."):
+        result = prune_api.analyze_with_config(config)
+
+    analysis_data = cast(dict[str, Any], result["result"])
+    _set_analysis_data(analysis_data, source_path=str(result["analysis_path"]))
+    _append_log(f"Analysis saved: {result['analysis_path']}")
+
+
+def _run_pruning() -> None:
+    """Execute structured pruning with the current protected-layer list."""
+    protected_layers = list(st.session_state.prune_protected_layers)
+    if not protected_layers:
+        raise ValueError("Define at least one protected layer before pruning.")
+
+    prune_api = _get_prune_api()
+    config = _build_runtime_config(require_output_path=True)
+
+    with st.spinner("Running structured pruning..."):
+        result = prune_api.prune_with_protected_layers(config, protected_layers)
+
+    st.session_state.prune_results = cast(dict[str, Any], result)
     st.session_state.prune_run_error = None
-    summary = [
-        f"Using pruning.ch_sparsity: {pruning_config['ch_sparsity']}",
-        f"Using pruning.checkpoint_path: {pruning_config['checkpoint_path']}",
-        f"Using pruning.output_path: {pruning_config['output_path']}",
-        f"Using pruning.ignore_layers: {pruning_config['ignore_layers']}",
-        f"Run directory: {run_dir}",
-        f"Layer decisions JSONL: {layer_decisions_path}",
-        f"Pruning summary JSON: {summary_path}",
-    ]
-    if summary_record:
-        summary.extend(
-            [
-                f"Params before: {summary_record['params_before']}",
-                f"Params after: {summary_record['params_after']}",
-                f"Params removed: {summary_record['params_removed']}",
-                f"Reduction ratio: {summary_record['params_reduction_ratio']}",
-            ]
+    _append_log(f"Pruned model saved: {result['output_path']}")
+
+
+def _render_model_section() -> None:
+    """Render section 1: model loading and summary."""
+    st.markdown("### 1. Model")
+    load_clicked = st.button("Load Weights", key="prune_load_weights")
+    if load_clicked:
+        st.session_state.show_prune_model_uploader = True
+
+    if st.session_state.show_prune_model_uploader:
+        uploaded_model = st.file_uploader(
+            "Select a TorchScript weights file",
+            type=["pt", "pth"],
+            accept_multiple_files=False,
+            key="prune_model_uploader",
         )
-    summary.append("Pruning finished successfully.")
-    st.session_state.prune_run_output = "\n".join(summary)
+        if uploaded_model is not None:
+            try:
+                _inspect_model(uploaded_model)
+            except Exception as exc:
+                st.session_state.prune_model_error = f"Failed to load model: {exc}"
 
-
-def render_architecture() -> None:
-    """Render the extracted model architecture as a tree-like list."""
     if st.session_state.prune_model_error:
         st.error(st.session_state.prune_model_error)
 
-    if not st.session_state.prune_model_layers:
+    summary = st.session_state.prune_model_summary
+    if not summary:
+        st.caption("Load weights to enable analysis and pruning.")
         return
 
-    with st.expander("Model architecture", expanded=True):
+    info_col1, info_col2, info_col3 = st.columns(3)
+    info_col1.metric("Model", str(summary["model_path"]))
+    info_col2.metric("Layers", str(summary["layer_count"]))
+    info_col3.metric("Params", _format_param_count(summary["param_count"]))
+
+    with st.expander("Model architecture", expanded=False):
         for layer in st.session_state.prune_model_layers:
-            depth = layer["name"].count(".")
-            indent = "&nbsp;" * 4 * depth
-            shape_parts = []
+            details = []
             if layer["input_shape"]:
-                shape_parts.append(f"in: {layer['input_shape']}")
+                details.append(f"in {layer['input_shape']}")
             if layer["output_shape"]:
-                shape_parts.append(f"out: {layer['output_shape']}")
-            shape_suffix = f" [{' | '.join(shape_parts)}]" if shape_parts else ""
-            st.markdown(
-                f"{indent}- `{layer['name']}` ({layer['type']}){shape_suffix}",
-                unsafe_allow_html=True,
-            )
+                details.append(f"out {layer['output_shape']}")
+            suffix = f" | {' | '.join(details)}" if details else ""
+            st.markdown(f"`{layer['name']}`  \n{layer['type']}{suffix}")
 
 
-def add_ignore_layer() -> None:
-    """Add a layer name to pruning.ignore_layers."""
-    layer_name = st.session_state.prune_ignore_layer_input.strip()
-    if not layer_name:
+def _render_analysis_section() -> None:
+    """Render section 2: optional analysis and review."""
+    st.markdown("### 2. Analysis")
+    st.caption("Estimate sensitivity and suggest layers to protect.")
+
+    disabled = not bool(st.session_state.prune_model_runtime_path)
+    action_col1, action_col2, action_col3 = st.columns([2.4, 1.4, 2.0])
+    with action_col1:
+        st.text_input(
+            "Threshold",
+            key="prune_analysis_threshold",
+            help="Equivalent to pruning.max_accuracy_drop for the analysis step.",
+        )
+    with action_col2:
+        if st.button("Run Analysis", key="prune_run_analysis", disabled=disabled):
+            try:
+                _run_analysis()
+            except Exception as exc:
+                st.session_state.prune_run_error = str(exc)
+    with action_col3:
+        if st.button(
+            "Load Previous Analysis",
+            key="prune_load_analysis",
+            disabled=disabled,
+        ):
+            st.session_state.show_prune_analysis_loader = True
+
+    if st.session_state.show_prune_analysis_loader:
+        uploaded_analysis = st.file_uploader(
+            "Select analysis_result.json",
+            type=["json"],
+            accept_multiple_files=False,
+            key="prune_analysis_uploader",
+        )
+        if uploaded_analysis is not None:
+            try:
+                _load_previous_analysis(uploaded_analysis)
+            except Exception as exc:
+                st.session_state.prune_analysis_import_error = str(exc)
+
+    if st.session_state.prune_analysis_import_error:
+        st.error(st.session_state.prune_analysis_import_error)
+
+    analysis_data = st.session_state.prune_analysis_data
+    if not analysis_data:
+        st.caption("Analysis is optional, but it helps prefill the protected-layer selection.")
         return
 
-    if layer_name not in st.session_state.prune_ignore_layers:
-        st.session_state.prune_ignore_layers.append(layer_name)
+    export_col1, export_col2 = st.columns([3, 2])
+    with export_col1:
+        source = st.session_state.prune_analysis_path or "Current session"
+        st.caption(f"Analysis source: {source}")
+    with export_col2:
+        st.download_button(
+            "Export Analysis JSON",
+            data=st.session_state.prune_analysis_json or "{}",
+            file_name="analysis_result.json",
+            mime="application/json",
+            key="prune_export_analysis",
+        )
 
-    st.session_state.prune_ignore_layer_input = ""
-
-
-def remove_ignore_layer(layer_name: str) -> None:
-    """Remove a layer name from pruning.ignore_layers."""
-    st.session_state.prune_ignore_layers = [
-        name for name in st.session_state.prune_ignore_layers if name != layer_name
-    ]
-
-
-def render_ignore_layers_editor() -> None:
-    """Render the manual ignore_layers editor."""
-    st.write("ignore_layers")
-
-    input_col, button_col = st.columns([5, 1])
-    with input_col:
-        st.text_input("Layer name", key="prune_ignore_layer_input", placeholder="features.0")
-    with button_col:
-        st.write("")
-        st.write("")
-        st.button("Add", key="add_ignore_layer", on_click=add_ignore_layer)
-
-    if not st.session_state.prune_ignore_layers:
-        return
-
-    for layer_name in st.session_state.prune_ignore_layers:
-        name_col, remove_col = st.columns([5, 1])
-        with name_col:
-            st.code(layer_name)
-        with remove_col:
-            st.button(
-                "Remove",
-                key=f"remove_ignore_layer_{layer_name}",
-                on_click=remove_ignore_layer,
-                args=(layer_name,),
-            )
-
-
-def render_model_selector() -> None:
-    """Render the model file picker for prune inputs."""
-    if st.button("Model", key="prune_model_button"):
-        st.session_state.show_prune_model_uploader = True
-
-    if not st.session_state.show_prune_model_uploader:
-        return
-
-    uploaded_model = st.file_uploader(
-        "Select a model file",
-        type=["pt", "pth"],
-        accept_multiple_files=False,
-        key="prune_model_uploader",
+    quick1, quick2, quick3 = st.columns(3)
+    quick1.button(
+        "Select suggested",
+        key="prune_select_suggested",
+        on_click=_set_selection_mode,
+        args=("suggested",),
+    )
+    quick2.button(
+        "Clear all",
+        key="prune_clear_selection",
+        on_click=_set_selection_mode,
+        args=("clear",),
+    )
+    quick3.button(
+        "Invert selection",
+        key="prune_invert_selection",
+        on_click=_set_selection_mode,
+        args=("invert",),
     )
 
-    if uploaded_model is not None:
-        st.session_state.prune_model_file = uploaded_model.name
+    header = st.columns([4, 2, 2, 3])
+    header[0].markdown("**Layer name**")
+    header[1].markdown("**Accuracy drop**")
+    header[2].markdown("**Suggested**")
+    header[3].markdown("**Reason**")
+
+    for entry in _analysis_layers():
+        layer_name = str(entry.get("layer", "")).strip()
+        if not layer_name:
+            continue
+
+        checkbox_key = _checkbox_key(layer_name)
+        st.session_state[checkbox_key] = layer_name in set(
+            st.session_state.prune_protected_layers
+        )
+
+        row = st.columns([4, 2, 2, 3])
+        row[0].code(layer_name)
+        row[1].write(f"{float(entry.get('accuracy_drop', 0.0)):.6f}")
+        row[2].checkbox(
+            "Protect",
+            key=checkbox_key,
+            label_visibility="collapsed",
+            on_change=_apply_checkbox_selection,
+        )
+        row[3].caption(str(entry.get("reason", "")))
+
+
+def _render_protected_layers_section() -> None:
+    """Render section 3: final source-of-truth protected layers."""
+    st.markdown("### 3. Protected Layers")
+    st.text_area(
+        "Protected layers",
+        key="prune_protected_layers_input",
+        placeholder="layer_a, layer_b",
+        help="Comma-separated or one layer per line. This field is the final source of truth.",
+        on_change=_apply_text_field_selection,
+        height=110,
+    )
+    count = len(st.session_state.prune_protected_layers)
+    st.caption(f"{count} protected layer(s) will be applied during pruning.")
+
+
+def _render_pruning_section() -> None:
+    """Render section 4: explicit pruning action."""
+    st.markdown("### 4. Pruning")
+    settings_col1, settings_col2 = st.columns(2)
+    settings_col1.text_input("Sparsity", key="prune_sparsity")
+    settings_col2.text_input("Output model path", key="prune_output_model")
+
+    disabled = not bool(st.session_state.prune_model_runtime_path) or not bool(
+        st.session_state.prune_protected_layers
+    )
+    if st.button("Run Pruning", key="prune_run_button", disabled=disabled):
         try:
-            inspect_uploaded_model(uploaded_model)
+            _run_pruning()
         except Exception as exc:
-            st.session_state.prune_model_layers = []
-            st.session_state.prune_model_runtime_path = None
-            st.session_state.prune_model_error = f"Failed to load model: {exc}"
+            st.session_state.prune_run_error = str(exc)
 
-    if st.session_state.prune_model_file:
-        st.caption(f"Selected model: {st.session_state.prune_model_file}")
+    if not st.session_state.prune_protected_layers:
+        st.warning("Define at least one protected layer to enable pruning.")
 
-    render_architecture()
+
+def _render_results_section() -> None:
+    """Render section 5: pruning results and small log panel."""
+    st.markdown("### 5. Results")
+
+    results = st.session_state.prune_results
+    if results:
+        summary = cast(dict[str, Any], results.get("summary", {}))
+        metrics = st.columns(4)
+        metrics[0].metric("Params before", _format_param_count(summary.get("params_before")))
+        metrics[1].metric("Params after", _format_param_count(summary.get("params_after")))
+        metrics[2].metric(
+            "Reduction",
+            _format_ratio(summary.get("params_reduction_ratio")),
+        )
+        metrics[3].metric("Output model", str(results.get("output_path", "")))
+
+        st.caption(f"Summary JSON: {results.get('summary_path', '')}")
+        st.caption(f"Layer decisions JSONL: {results.get('layer_decisions_path', '')}")
+    else:
+        st.caption("No pruning results yet.")
+
+    if st.session_state.prune_run_error:
+        st.error(st.session_state.prune_run_error)
+
+    with st.expander("Log", expanded=False):
+        if st.session_state.prune_logs:
+            st.code("\n".join(st.session_state.prune_logs))
+        else:
+            st.caption("No log entries yet.")
 
 
 def render() -> None:
     """Render the prune tab content."""
     st.subheader("Prune")
-    st.text_input("sparsity", key="prune_sparsity")
-    render_model_selector()
-    render_ignore_layers_editor()
-    st.text_input("output_model", key="prune_output_model")
+    st.caption("Load → Analyse (optional) → Review/Edit → Prune")
 
-    if st.button("Prune", key="prune_run_button"):
-        try:
-            run_pruning()
-        except Exception as exc:
-            st.session_state.prune_run_output = None
-            st.session_state.prune_run_error = str(exc)
-
-    if st.session_state.prune_run_error:
-        st.error(st.session_state.prune_run_error)
-
-    if st.session_state.prune_run_output:
-        with st.expander("Prune output", expanded=True):
-            st.code(st.session_state.prune_run_output)
+    _render_model_section()
+    st.divider()
+    _render_analysis_section()
+    st.divider()
+    _render_protected_layers_section()
+    st.divider()
+    _render_pruning_section()
+    st.divider()
+    _render_results_section()
